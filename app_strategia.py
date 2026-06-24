@@ -70,6 +70,24 @@ def calcola_modello():
 
 # ============================================================================
 st.set_page_config(page_title="Strategia MIBO", page_icon="📈", layout="centered")
+
+# ---------------- autenticazione ----------------
+PASSWORD = "Overthemoon?"   # <-- cambia questa password
+
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+
+if not st.session_state.auth:
+    st.title("🔒 Accesso richiesto")
+    pwd = st.text_input("Password", type="password")
+    if st.button("Entra"):
+        if pwd == PASSWORD:
+            st.session_state.auth = True
+            st.rerun()
+        else:
+            st.error("Password errata.")
+    st.stop()
+
 st.title("📈 Strategia MIBO — put-protected strangle")
 
 col1,col2=st.columns([3,1])
