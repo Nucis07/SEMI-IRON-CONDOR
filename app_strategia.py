@@ -21,9 +21,9 @@ warnings.filterwarnings("ignore")
 TICKER="FTSEMIB.MI"; FINESTRA=750; ORIZZONTE=4; N_SIM=50_000
 MOLT=2.5; STEP=100
 SHORT_PUT_PCT=25.0; SHORT_CALL_PCT=75.0; DIST_ALA=1500.0
-VRP_MARKUP=1.25; COSTO_GAMBA=5.0
+VRP_MARKUP=1.25; COSTO_GAMBA=1.0   # in PUNTI: 1 pt = 2,5€ -> commissione 2,5€/gamba = 1.0
 USA_EVT_TAIL=True; SOGLIA_EVT=0.10
-SOGLIA_EDGE_PT=20.0; VOL_PCT_MEDIA=50.0; VOL_PCT_ALTA=75.0
+MARGINE_PCT=0.104; VOL_PCT_MEDIA=50.0; VOL_PCT_ALTA=75.0   # margine dinamico = 10,4% del fair (era SOGLIA_EDGE_PT=20)
 SHORT_CALL_SQUEEZE=90.0; VOL_PCT_SQUEEZE=80.0; DD_SQUEEZE_PCT=15.0; FIN_MAX_DD=63
 
 def gjr(s2,e,om,al,ga,be): return om+al*e**2+ga*(e**2)*(e<0)+be*s2
@@ -160,24 +160,27 @@ if pronto:
     net_mid=mc+mp-ml          # prezzo di mercato "pulito" (mid)
     net_exe=ec+ep-el          # eseguito (per slippage e P&L)
     net_equo=fcr+fpr-flr      # valore equo (modello)
-    edge=net_mid-net_equo                      # edge mid-based (come il foglio)
+    edge=net_mid-net_equo-3*COSTO_GAMBA        # edge sul MID, AL NETTO commissioni (3 gambe)
+    soglia_pt=MARGINE_PCT*net_equo if net_equo>0 else float("inf")  # margine dinamico (10,4% del fair)
     markup=net_mid/net_equo if net_equo>0 else float("nan")   # -> VRP_MARKUP
     slippage=net_mid-net_exe                    # mid - eseguito -> COSTO_GAMBA
     ivw=iv_imp(el,P0,Kpw,'p'); skew=ivw/iv if (iv>0 and not np.isnan(ivw)) else float("nan")
-    verdetto = "NEG" if edge<=0 else ("SOTT" if edge<SOGLIA_EDGE_PT else "POS")
+    verdetto = "NEG" if edge<=0 else ("SOTT" if edge<soglia_pt else "POS")
 
     st.subheader("Decisione")
     d1,d2,d3=st.columns(3)
-    d1.metric("EDGE (mid) reale", f"{edge:+.0f} pt", f"{edge*MOLT:+,.0f} €")
-    d2.metric("Markup struttura (mid)", f"{markup:.3f}x" if markup==markup else "—")
+    d1.metric("EDGE netto (mid−comm)", f"{edge:+.0f} pt", f"{edge*MOLT:+,.0f} €")
+    d2.metric("Markup (mid, lordo comm.)", f"{markup:.3f}x" if markup==markup else "—")
     d3.metric("Slippage (mid-eseg.)", f"{slippage:+.0f} pt")
     if edge<=0:
         st.error("⛔ SALTA: edge ≤ 0, valore atteso negativo.")
-    elif edge<SOGLIA_EDGE_PT:
-        st.warning(f"⚠️ VALUTA: edge sottile ({edge:.0f} pt). Size minima o salta.")
+    elif edge<soglia_pt:
+        st.warning(f"⚠️ VALUTA: edge netto {edge:.0f} pt < soglia {soglia_pt:.0f} pt "
+                   f"(comm. incluse). Size minima o salta.")
     else:
         size = "BASSA" if regime=="BASSA" else ("NORMALE" if regime=="MEDIA" else "ALTA")
-        st.success(f"✅ OPERA — SIZE {size}  (edge {edge:.0f} pt, vol {regime})")
+        st.success(f"✅ OPERA — SIZE {size}  (edge netto {edge:.0f} pt ≥ soglia {soglia_pt:.0f} pt, "
+                   f"comm. incluse, vol {regime})")
     if skew==skew:
         st.caption(f"Ala long put: IV implicita {ivw*100:.2f}% vs modello {iv*100:.2f}% = {skew:.2f}x "
                    f"({'equa' if skew<=1.5 else 'cara' if skew<=2.5 else 'molto cara'})")
