@@ -23,12 +23,14 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ---------------- parametri (come negli script) ----------------
-TICKER="FTSEMIB.MI"; FINESTRA=750; ORIZZONTE=4; N_SIM=50_000
+TICKER="FTSEMIB.MI"; FINESTRA=756; ORIZZONTE_DEFAULT=4
+N_SIM=100_000   # come il backtest; riduci a 50_000 solo se il cloud soffre di RAM
 MOLT=2.5; STEP=100
 SHORT_PUT_PCT=25.0; SHORT_CALL_PCT=75.0; DIST_ALA=1500.0
 VRP_MARKUP=1.25; COSTO_GAMBA=1.0   # in PUNTI: 1 pt = 2,5€ -> commissione 2,5€/gamba = 1.0
 USA_EVT_TAIL=True; SOGLIA_EVT=0.10
-MARGINE_PCT=0.104; VOL_PCT_MEDIA=50.0; VOL_PCT_ALTA=75.0   # margine dinamico = 10,4% del fair (era SOGLIA_EDGE_PT=20)
+MARGINE_PCT=0.104; SOGLIA_OPER=1.15   # pavimento economico e soglia operativa sul markup
+VOL_PCT_MEDIA=50.0; VOL_PCT_ALTA=75.0
 SHORT_CALL_SQUEEZE=90.0; VOL_PCT_SQUEEZE=80.0; DD_SQUEEZE_PCT=15.0; FIN_MAX_DD=63
 
 def gjr(s2,e,om,al,ga,be): return om+al*e**2+ga*(e**2)*(e<0)+be*s2
@@ -50,14 +52,14 @@ def iv_imp(prezzo,S,K,kind):
     except Exception: return np.nan
 
 @st.cache_data(ttl=1800, show_spinner="Scarico dati e stimo il GARCH...")
-def calcola_modello():
+def calcola_modello(H):
     np.random.seed(42)
     df=yf.download(TICKER,period="5y",progress=False,auto_adjust=False)
     if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.droplevel(1)
     df=df.dropna()
     px=df["Close"].values
-    close=df["Close"].iloc[-FINESTRA:]; rend=close.pct_change().dropna().values*100.0
-    m=arch_model(rend,mean="Constant",vol="GARCH",p=1,o=1,q=1,dist="skewt",rescale=False).fit(disp="off")
+    close=df["Close"].iloc[-FINESTRA:]; rend=(np.log(close/close.shift(1))).dropna().values*100.0
+    m=arch_model(rend,mean="Zero",vol="GARCH",p=1,o=1,q=1,dist="skewt",rescale=False).fit(disp="off")
     om=m.params["omega"]; al=m.params["alpha[1]"]; ga=m.params["gamma[1]"]; be=m.params["beta[1]"]
     var0=float(m.forecast(horizon=1,reindex=False).variance.iloc[-1,0])
     pool=np.asarray(m.std_resid); pool=pool[~np.isnan(pool)]
@@ -65,13 +67,13 @@ def calcola_modello():
     if USA_EVT_TAIL and len(pool)>30:
         u=np.quantile(pool,SOGLIA_EVT); ex=u-pool[pool<u]
         c_,_,sc_=stats.genpareto.fit(ex,floc=0); evt=(u,c_,sc_)
-    cum=fhs(var0,pool,om,al,ga,be,ORIZZONTE,N_SIM,evt)
+    cum=fhs(var0,pool,om,al,ga,be,H,N_SIM,evt)
     ratios=np.exp(cum); vol=cum.std()
     # distribuzione storica vol realizzata (per il percentile/regime)
     logret=np.diff(np.log(px))
-    roll=pd.Series(logret).rolling(20).std().dropna().values*np.sqrt(ORIZZONTE)
+    roll=pd.Series(logret).rolling(20).std().dropna().values*np.sqrt(H)
     vol_real=float(roll[-1])                                   # vol realizzata corrente (20g, weekly)
-    vol_recent=float(np.std(logret[-5:])*np.sqrt(ORIZZONTE))   # realizzata ultimi 5g (per shock recente)
+    vol_recent=float(np.std(logret[-5:])*np.sqrt(H))   # realizzata ultimi 5g (per shock recente)
     return dict(px_last=float(close.iloc[-1]), ratios=ratios, vol=float(vol),
                 roll=roll, vol_real=vol_real, vol_recent=vol_recent,
                 px_recent=px[-FIN_MAX_DD:], data=str(df.index[-1].date()))
@@ -79,32 +81,21 @@ def calcola_modello():
 # ============================================================================
 st.set_page_config(page_title="Strategia MIBO", page_icon="📈", layout="centered")
 
-# ---------------- autenticazione ----------------
-PASSWORD = "Overthemoon?"   # <-- cambia questa password
-
-if "auth" not in st.session_state:
-    st.session_state.auth = False
-
-if not st.session_state.auth:
-    st.title("🔒 Accesso richiesto")
-    pwd = st.text_input("Password", type="password")
-    if st.button("Entra"):
-        if pwd == PASSWORD:
-            st.session_state.auth = True
-            st.rerun()
-        else:
-            st.error("Password errata.")
-    st.stop()
-
 st.title("📈 Strategia MIBO — put-protected strangle")
 
 col1,col2=st.columns([3,1])
 with col2:
     if st.button("🔄 Aggiorna dati"): st.cache_data.clear(); st.rerun()
 
-M=calcola_modello()
+H = st.number_input("Orizzonte H (giorni di borsa fino al regolamento)",
+                    min_value=1, max_value=20, value=ORIZZONTE_DEFAULT, step=1,
+                    help="4 = settimana normale (ven chiusura -> ven asta). Alza a 5 se giri "
+                         "il giovedi'/venerdi' mattina o se la settimana ha un giorno in piu'; "
+                         "abbassa se la scadenza e' anticipata (es. festivi). Oltre ~10 giorni "
+                         "la calibrazione del motore weekly non e' verificata: usa con cautela.")
+M=calcola_modello(int(H))
 with col1:
-    st.caption(f"Ultimo dato: {M['data']} · clicca Aggiorna per riscaricare")
+    st.caption(f"Ultimo dato: {M['data']} · H={int(H)} · clicca Aggiorna per riscaricare")
 
 # prezzo manuale (ritardo yfinance)
 pm=st.number_input("Prezzo FTSE MIB (lascia 0 per usare yfinance: %.0f)" % M["px_last"],
@@ -139,13 +130,16 @@ else:
 Kps=np.percentile(PT,SHORT_PUT_PCT); Kpw=Kps-DIST_ALA
 Kcs=np.percentile(PT,SHORT_CALL_PCT); Kc90=np.percentile(PT,SHORT_CALL_SQUEEZE)
 Kcall=Kc90 if squeeze else Kcs
-rnd=lambda x: round(x/STEP)*STEP
+rnd_giu=lambda x: np.floor(x/STEP)*STEP   # put: verso il basso
+rnd_su =lambda x: np.ceil(x/STEP)*STEP    # call: verso l'alto
 def gamba(K,kind):
     fair=float(np.mean(np.maximum((PT-K) if kind=='c' else (K-PT),0.0))); return fair, bs(P0,K,iv,kind)
 # fair ai consigliati (solo per la tabella di riferimento)
 fc_r,bc_r=gamba(Kcall,'c'); fp_r,bp_r=gamba(Kps,'p'); fl_r,bl_r=gamba(Kpw,'p')
 # strike consigliati arrotondati (default dei campi editabili)
-rec_call, rec_ps, rec_pw = float(rnd(Kcall)), float(rnd(Kps)), float(rnd(Kpw))
+rec_ps  = float(rnd_giu(Kps))
+rec_call = float(rnd_su(Kcall))
+rec_pw  = rec_ps - DIST_ALA   # in griglia per costruzione
 
 # ---------------- pannello livelli ----------------
 c1,c2,c3=st.columns(3)
@@ -165,7 +159,7 @@ st.caption(f"{lente[0]} {lente[1]}")
 st.subheader("Strike consigliati dal modello")
 tab=pd.DataFrame({
     "gamba":["VENDI CALL"+(" (90° squeeze)" if squeeze else ""),"VENDI PUT","COMPRA LONG PUT"],
-    "strike":[rnd(Kcall),rnd(Kps),rnd(Kpw)],
+    "strike":[int(rnd_su(Kcall)),int(rnd_giu(Kps)),int(rnd_giu(Kps)-DIST_ALA)],
     "equo (VRP0)":[round(fc_r),round(fp_r),round(fl_r)],
     "BS@IV":[round(bc_r),round(bp_r),round(bl_r)]})
 st.table(tab.set_index("gamba"))
@@ -236,26 +230,40 @@ if pronto:
     net_op = net_exe if eseguito_inserito else net_mid   # edge su ESEGUITO se inserito, altrimenti MID
     base = "ESEGUITO" if eseguito_inserito else "MID"
     edge=net_op-net_equo-3*COSTO_GAMBA          # edge AL NETTO commissioni (3 gambe)
-    soglia_pt=MARGINE_PCT*net_equo if net_equo>0 else float("inf")  # margine dinamico (10,4% del fair)
     markup=net_op/net_equo if net_equo>0 else float("nan")
     slippage=net_mid-net_exe                    # mid - eseguito (controllo serale)
+    # doppia soglia: pavimento economico (1.104 + costi) e soglia OPERATIVA (markup 1.15)
+    net_min_pav = net_equo*(1+MARGINE_PCT)+3*COSTO_GAMBA
+    net_min_oper = net_equo*SOGLIA_OPER
+    cuscino = net_mid - net_min_oper            # budget di slippage vs il mid
     ivw=iv_imp(el,P0,Kpw_op,'p'); skew=ivw/iv if (iv>0 and not np.isnan(ivw)) else float("nan")
-    verdetto = "NEG" if edge<=0 else ("SOTT" if edge<soglia_pt else "POS")
+    # verdetto allineato al foglio: NEG sotto il pavimento, SOTT tra pavimento e
+    # operativa, POS sopra la soglia operativa 1.15
+    verdetto = "NEG" if net_op<net_min_pav else ("SOTT" if net_op<net_min_oper else "POS")
 
     st.subheader("Decisione")
     d1,d2,d3=st.columns(3)
-    d1.metric(f"EDGE netto ({base}−comm)", f"{edge:+.0f} pt", f"{edge*MOLT:+,.0f} €")
-    d2.metric(f"Markup ({base}, lordo comm.)", f"{markup:.3f}x" if markup==markup else "—")
-    d3.metric("Slippage (mid-eseg.)", f"{slippage:+.0f} pt")
-    if edge<=0:
-        st.error("⛔ SALTA: edge ≤ 0, valore atteso negativo.")
-    elif edge<soglia_pt:
-        st.warning(f"⚠️ VALUTA: edge netto {edge:.0f} pt < soglia {soglia_pt:.0f} pt "
-                   f"(comm. incluse). Size minima o salta.")
+    d1.metric(f"Markup ({base})", f"{markup:.3f}x" if markup==markup else "—",
+              f"soglia {SOGLIA_OPER:.2f}")
+    d2.metric("Cuscino vs mid", f"{cuscino:+.0f} pt",
+              "budget slippage" if cuscino>0 else "sotto soglia")
+    d3.metric(f"EDGE netto ({base}−comm)", f"{edge:+.0f} pt", f"{edge*MOLT:+,.0f} €")
+    st.caption(f"Net dal book ({base}): {net_op:.0f} pt · pavimento economico: {net_min_pav:.0f} pt "
+               f"· minimo OPERATIVO (markup {SOGLIA_OPER:.2f}): {net_min_oper:.0f} pt "
+               f"· slippage speso finora: {slippage:+.0f} pt")
+    if verdetto=="NEG":
+        st.error(f"⛔ SALTA: net {net_op:.0f} pt sotto il pavimento economico "
+                 f"({net_min_pav:.0f} pt). Il rischio non e' pagato.")
+    elif verdetto=="SOTT":
+        st.error(f"⛔ SALTA: net {net_op:.0f} pt sopra il pavimento economico ma sotto il "
+                 f"minimo operativo {net_min_oper:.0f} pt (markup {SOGLIA_OPER:.2f}). In questa "
+                 f"fascia l'edge teorico non copre l'esecuzione: nel backtest e' in perdita. "
+                 f"Niente trade, nemmeno a size ridotta.")
     else:
         size = "BASSA" if regime=="BASSA" else ("NORMALE" if regime=="MEDIA" else "ALTA")
-        st.success(f"✅ OPERA — SIZE {size}  (edge netto {edge:.0f} pt ≥ soglia {soglia_pt:.0f} pt, "
-                   f"comm. incluse, vol {regime})")
+        st.success(f"✅ OPERA — SIZE {size}. Cuscino {cuscino:.0f} pt: puoi concedere fino a "
+                   f"{cuscino:.0f} pt totali dal mid lavorando gli ordini (prima l'ala, poi le short) "
+                   f"e restare sopra la soglia {SOGLIA_OPER:.2f}.")
     if skew==skew:
         st.caption(f"Ala long put: IV implicita {ivw*100:.2f}% vs modello {iv*100:.2f}% = {skew:.2f}x "
                    f"({'equa' if skew<=1.5 else 'cara' if skew<=2.5 else 'molto cara'})")
