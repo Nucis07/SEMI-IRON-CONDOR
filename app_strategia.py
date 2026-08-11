@@ -5,6 +5,15 @@
 #  >>> STRIKE EDITABILI: puoi cambiare i 3 strike (es. long put piu' vicina di
 #      1500 se non c'e') e fair/edge/markup si ricalcolano su QUELLI. Gli strike
 #      operati PERSISTONO quando rigiri il modello (mattina -> sera).
+#  >>> RIPIEGO PUT SPREAD: se la struttura a 3 gambe non supera le soglie, l'app
+#      verifica se le supera il solo PUT SPREAD (short put + long put). Spesso e'
+#      la CALL prezzata al fair value che schiaccia il markup aggregato mentre la
+#      PUT resta ricca. Se il ripiego passa si opera a 2 gambe, SEMPRE a 1 lotto:
+#      nella banda 1.15-1.35 il put spread da solo e' la fascia peggiore, quindi
+#      la size tripla NON si applica.
+#  >>> VERDETTO: POS3 (3 gambe) / POS2 (call staccata da drawdown o banda markup)
+#      / POS2R (ripiego sul put spread) / SOTT / NEG. Il Riepilogo del foglio usa
+#      "POS*" per aggregare e ha righe separate per POS3, POS2 e POS2R.
 #  >>> RIGA FOGLIO: come eseguito si copia il MID (niente fill manuale nel foglio);
 #      i campi "eseguito" restano nell'app per il controllo serale e lo slippage.
 #  Avvio locale:  streamlit run app_strategia.py
@@ -33,6 +42,8 @@ MARGINE_PCT=0.104; SOGLIA_OPER=1.15   # pavimento economico e soglia operativa s
 VOL_PCT_MEDIA=50.0; VOL_PCT_ALTA=75.0
 DD_STACCA_CALL=15.0; FIN_MAX_DD=63   # dd 3m oltre il quale la CALL si stacca (2 gambe)
 MK_BANDA=(1.50, 1.80)   # banda markup 3g che stacca la CALL (OR col dd); None disattiva
+RIPIEGO_PUT_SPREAD=True # se la struttura a 3 gambe non passa, prova il solo put spread
+RIPIEGO_SIZE_1=True     # il ripiego si opera sempre a 1 lotto (niente banda 1.15-1.35)
 
 def gjr(s2,e,om,al,ga,be): return om+al*e**2+ga*(e**2)*(e<0)+be*s2
 def fhs(s2s,pool,om,al,ga,be,H,N,evt):
@@ -243,6 +254,29 @@ if pronto:
         st.warning(f"✂️ CALL STACCATA — sensore BANDA MARKUP: markup 3 gambe {mk3_:.3f} "
                    f"∈ [{MK_BANDA[0]:.2f}, {MK_BANDA[1]:.2f}) = stress prezzato senza crollo. "
                    "Si opera il PUT SPREAD; i prezzi call restano solo come misura.")
+    # ---- RIPIEGO SUL SOLO PUT SPREAD ----------------------------------------
+    # Se la struttura a 3 gambe non supera le due soglie, si verifica se le supera
+    # il put spread da solo. Motivo: la call viene spesso prezzata al fair value
+    # del modello (markup ~1.0) e trascina giu' il markup aggregato anche quando
+    # la put e' ricca. In quel caso si vende solo la put, protetta dall'ala.
+    ripiego_ps = False
+    if RIPIEGO_PUT_SPREAD and not stacca_call and mc>0 and ne3_>0:
+        nm3_ = mc+mp-ml
+        passa3 = (nm3_ >= ne3_*(1+MARGINE_PCT)+3*COSTO_GAMBA) and (nm3_ >= ne3_*SOGLIA_OPER)
+        ne2_ = fpr-flr
+        nm2_ = mp-ml
+        passa2 = (ne2_>0 and nm2_ >= ne2_*(1+MARGINE_PCT)+2*COSTO_GAMBA
+                  and nm2_ >= ne2_*SOGLIA_OPER)
+        if (not passa3) and passa2:
+            ripiego_ps = True
+            stacca_call = True
+            st.warning(f"↩️ RIPIEGO SUL PUT SPREAD — la struttura a 3 gambe non passa "
+                       f"(markup 3g {mk3_:.3f}), ma il solo put spread si': markup "
+                       f"{nm2_/ne2_:.3f}. Si vende la PUT protetta dall'ala, la CALL resta "
+                       f"fuori. Size fissa a 1 LOTTO: nella banda 1.15-1.35 il put spread "
+                       f"da solo e' la fascia con il rapporto peggiore, quindi la regola "
+                       f"del triplo non si applica.")
+
     N_GAMBE = 2 if stacca_call else 3
     net_mid=(0 if stacca_call else mc)+mp-ml
     net_exe=(0 if stacca_call else ec)+ep-el
@@ -260,6 +294,8 @@ if pronto:
     # --- markup AL MID (decide la SIZE, come nel backtest) ---
     markup_mid = net_mid/net_equo if net_equo>0 else float("nan")
     in_banda_size = (markup_mid==markup_mid) and (1.15 <= markup_mid < 1.35)
+    if ripiego_ps and RIPIEGO_SIZE_1:
+        in_banda_size = False                 # sul ripiego la banda non vale
     lotti_reg = 3 if in_banda_size else 1     # triplo nella banda di qualita' 1.15-1.35
     # --- markup LIVE (aggiornamento durante l'esecuzione: eseguito dove inserito, mid altrove) ---
     #     net_op e' gia' costruito cosi'; markup_live = net_op/net_equo
@@ -269,7 +305,13 @@ if pronto:
     ivw=iv_imp(el,P0,Kpw_op,'p'); skew=ivw/iv if (iv>0 and not np.isnan(ivw)) else float("nan")
     # verdetto allineato al foglio: NEG sotto il pavimento, SOTT tra pavimento e
     # operativa, POS sopra la soglia operativa 1.15
-    verdetto = "NEG" if net_op<net_min_pav else ("SOTT" if net_op<net_min_oper else "POS")
+    # POS3 = struttura a 3 gambe · POS2 = put spread (stacca-call o ripiego)
+    if net_op < net_min_pav:
+        verdetto = "NEG"
+    elif net_op < net_min_oper:
+        verdetto = "SOTT"
+    else:
+        verdetto = ("POS2R" if ripiego_ps else "POS2") if N_GAMBE == 2 else "POS3"
 
     st.subheader("Decisione")
     d1,d2,d3=st.columns(3)
@@ -278,7 +320,8 @@ if pronto:
     d2.metric("Punti residui vs 1.15", f"{punti_residui:+.0f} pt",
               "budget slippage" if punti_residui>0 else "SOTTO SOGLIA")
     d3.metric(f"EDGE netto ({base}−comm)", f"{edge:+.0f} pt", f"{edge*MOLT:+,.0f} €")
-    st.caption(f"SIZE decisa sul mid: {'3 LOTTI (banda 1.15-1.35)' if in_banda_size else '1 lotto'} "
+    _sz = '3 LOTTI (banda 1.15-1.35)' if in_banda_size else ('1 lotto (ripiego)' if ripiego_ps else '1 lotto')
+    st.caption(f"SIZE decisa sul mid: {_sz} "
                f"· markup mid {markup_mid:.3f}  |  markup live {markup_live:.3f}")
     st.caption(f"Net dal book ({base}): {net_op:.0f} pt · pavimento economico: {net_min_pav:.0f} pt "
                f"· minimo OPERATIVO (markup {SOGLIA_OPER:.2f}): {net_min_oper:.0f} pt "
@@ -297,7 +340,8 @@ if pronto:
                  f"prezzi non esiste: chiudi le eventuali gambe gia' aperte e passa la settimana. "
                  f"(La size non conta: sotto 1.15 non si opera.)")
     else:
-        lotti_txt = "3 LOTTI (banda qualita' 1.15-1.35)" if in_banda_size else "1 lotto"
+        lotti_txt = ("3 LOTTI (banda qualita' 1.15-1.35)" if in_banda_size
+                     else ("1 lotto — PUT SPREAD di ripiego" if ripiego_ps else "1 lotto"))
         st.success(f"✅ OPERA — {lotti_txt}. Punti residui {punti_residui:+.0f} pt: puoi concedere "
                    f"fino a {punti_residui:.0f} pt ancora dal punto attuale lavorando gli ordini "
                    f"(prima l'ala, poi le short) e restare sopra {SOGLIA_OPER:.2f}. "
@@ -328,6 +372,10 @@ if pronto:
           f"{vol_w:.2f}", c_(f"{fcr:.0f}"), f"{fpr:.0f}", f"{flr:.0f}", verdetto,
           f"{ncontr if ncontr>0 else lotti_reg:d}", esito_fill]
     st.code("\t".join(riga), language=None)
+    if ripiego_ps:
+        st.caption("Riga da RIPIEGO: colonne della call vuote e verdetto POS2R, "
+                   "distinto da POS2 dello stacca-call. Il Riepilogo del foglio tiene "
+                   "le due statistiche separate.")
     st.caption(f"Esito fill: **{esito_fill}** ({n_exe}/{n_att} gambe eseguite). "
                "Incolla la riga all'apertura coi soli mid; completa le celle eseguito (F/G/H) "
                "a posizione chiusa. P&L e slippage nel foglio scattano solo con tutte le gambe piene.")
