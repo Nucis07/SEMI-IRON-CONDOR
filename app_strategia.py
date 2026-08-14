@@ -236,16 +236,18 @@ st.caption(f"{lente[0]} {lente[1]}")
 st.subheader("Strike consigliati dal modello")
 if stacca_call:
     tab=pd.DataFrame({
-        "gamba":["VENDI PUT","COMPRA LONG PUT"],
-        "strike":[int(rnd_giu(Kps)),int(rnd_giu(Kps)-DIST_ALA)],
-        "equo (VRP0)":[round(fp_r),round(fl_r)],
-        "BS@IV":[round(bp_r),round(bl_r)]})
+        "gamba":["LONG PUT (compri)","SHORT PUT (vendi)"],
+        "strike":[int(rnd_giu(Kps)-DIST_ALA),int(rnd_giu(Kps))],
+        "equo (VRP0)":[round(fl_r),round(fp_r)],
+        "BS@IV":[round(bl_r),round(bp_r)]})
 else:
     tab=pd.DataFrame({
-        "gamba":["COMPRA LONG CALL","VENDI CALL","VENDI PUT","COMPRA LONG PUT"],
-        "strike":[int(rec_cw),int(rnd_su(Kcall)),int(rnd_giu(Kps)),int(rnd_giu(Kps)-DIST_ALA)],
-        "equo (VRP0)":[round(flc_r),round(fc_r),round(fp_r),round(fl_r)],
-        "BS@IV":[round(blc_r),round(bc_r),round(bp_r),round(bl_r)]})
+        "gamba":["LONG PUT (compri)","SHORT PUT (vendi)",
+                 "LONG CALL (compri)","SHORT CALL (vendi)"],
+        "strike":[int(rnd_giu(Kps)-DIST_ALA),int(rnd_giu(Kps)),
+                  int(rec_cw),int(rnd_su(Kcall))],
+        "equo (VRP0)":[round(fl_r),round(fp_r),round(flc_r),round(fc_r)],
+        "BS@IV":[round(bl_r),round(bp_r),round(blc_r),round(bc_r)]})
 st.table(tab.set_index("gamba"))
 
 # ---------------- STRIKE OPERATI (editabili, persistenti) ----------------
@@ -269,10 +271,10 @@ with bcol2:
                "Fair/edge/markup si ricalcolano su questi. I valori restano se rigiri il modello.")
 
 e1,e2,e3,e4=st.columns(4)
-Kcw_op  =e1.number_input("LONG CALL operata", min_value=0.0, step=float(STEP), key="k_cw",   format="%.0f")
-Kcall_op=e2.number_input("CALL operata",      min_value=0.0, step=float(STEP), key="k_call", format="%.0f")
-Kps_op  =e3.number_input("PUT operata",       min_value=0.0, step=float(STEP), key="k_ps",   format="%.0f")
-Kpw_op  =e4.number_input("LONG PUT operata",  min_value=0.0, step=float(STEP), key="k_pw",   format="%.0f")
+Kpw_op  =e1.number_input("LONG PUT operata",  min_value=0.0, step=float(STEP), key="k_pw",   format="%.0f")
+Kps_op  =e2.number_input("SHORT PUT operata", min_value=0.0, step=float(STEP), key="k_ps",   format="%.0f")
+Kcw_op  =e3.number_input("LONG CALL operata", min_value=0.0, step=float(STEP), key="k_cw",   format="%.0f")
+Kcall_op=e4.number_input("SHORT CALL operata",min_value=0.0, step=float(STEP), key="k_call", format="%.0f")
 
 ala_op    = Kps_op - Kpw_op
 ala_c_op  = Kcw_op - Kcall_op
@@ -319,34 +321,74 @@ f_lc,b_lc=gamba(Kcw_op,'c')
 
 # ---------------- inserimento prezzi ----------------
 st.subheader("Prezzi dal book (bid / ask)")
-def leg_input(nome):
-    a,b,c=st.columns(3)
-    bid=a.number_input(f"{nome} BID",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=nome+"b")
-    ask=b.number_input(f"{nome} ASK",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=nome+"a")
-    exe=c.number_input(f"{nome} eseguito (opz)",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=nome+"e")
+def leg_input(nome, chiave=None):
+    """nome = etichetta a schermo · chiave = prefisso di session_state.
+       Le due cose sono separate cosi' l'ordine di visualizzazione si puo'
+       cambiare senza azzerare i valori gia' inseriti.
+       La quarta colonna mostra il MID appena bid e ask sono compilati, con lo
+       scarto dell'eseguito quando c'e': serve a vedere subito quanto si sta
+       lasciando sul tavolo gamba per gamba."""
+    k = chiave if chiave is not None else nome
+    a,b,c,d=st.columns([1,1,1,1])
+    bid=a.number_input(f"{nome} BID",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=k+"b")
+    ask=b.number_input(f"{nome} ASK",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=k+"a")
+    exe=c.number_input(f"{nome} eseguito (opz)",min_value=0.0,value=0.0,step=1.0,format="%.0f",key=k+"e")
+    if bid>0 and ask>0:
+        m=(bid+ask)/2; sp=ask-bid
+        if exe>0:
+            venduta = not nome.startswith("LONG")
+            scarto = (exe-m) if venduta else (m-exe)   # positivo = meglio del mid
+            d.metric("mid", f"{m:.1f}", f"{scarto:+.1f} vs mid",
+                     delta_color="normal" if scarto>=0 else "inverse")
+        else:
+            d.metric("mid", f"{m:.1f}", f"spread {sp:.0f}", delta_color="off")
+    else:
+        d.metric("mid", "—")
     return bid,ask,exe
-cb,ca,ce=leg_input("CALL")
-pb,pa,pe=leg_input("PUT")
-lb,la,le=leg_input("LONG PUT")
-lcb,lca,lce=leg_input("LONG CALL")
+# ordine a schermo: LONG PUT · SHORT PUT · LONG CALL · SHORT CALL
+lb,la,le    = leg_input("LONG PUT",   "LONG PUT")
+pb,pa,pe    = leg_input("SHORT PUT",  "PUT")
+lcb,lca,lce = leg_input("LONG CALL",  "LONG CALL")
+cb,ca,ce    = leg_input("SHORT CALL", "CALL")
 ncontr=st.number_input("N contratti (0 = usa la size suggerita dalla banda)",min_value=0,value=0,step=1)
 
 def mid(b,a): return (b+a)/2 if (b>0 and a>0) else 0.0
 mc,mp,ml,mlc=mid(cb,ca),mid(pb,pa),mid(lb,la),mid(lcb,lca)
+
+# --- SOLO PUT SPREAD -------------------------------------------------------
+# Capita di riempire il put spread e di esaurire il budget di slippage prima di
+# aprire le due gambe call. In quel caso la soglia va ricalcolata sulla
+# struttura che stai davvero aprendo: il pavimento a 2 gambe e' net_equo*1.104
+# + 2 punti invece di + 4, e il net_equo non contiene le gambe call.
+# Sui dati 2020-2026 il put spread supera comunque la propria soglia nel 92%
+# delle settimane in cui passavano le 4 gambe, e rinunciare alla call costa in
+# media 28 EUR per lotto (t=0.49, indistinguibile da zero).
+put_pronto  = (mp>0 and ml>0)
+call_pronta = (mc>0 and mlc>0)
+solo_ps_auto = put_pronto and (not call_pronta)
+solo_ps = st.checkbox("Valuta SOLO il put spread (call non aperta)",
+                      value=solo_ps_auto,
+                      help="Si attiva da sola se metti i prezzi di put e long put "
+                           "ma non quelli delle due gambe call.")
+if solo_ps and solo_ps_auto:
+    st.info("↩️ Mancano i prezzi delle gambe call: valuto il **solo put spread** "
+            "con la soglia a 2 gambe. Se poi riesci ad aprire anche la call, "
+            "inserisci i suoi prezzi e il verdetto si ricalcola da solo.")
 # eseguito: se non inserito, uso il mid (assume fill al mid) -> serve in app per slippage serale
 ec=ce if ce>0 else mc; ep=pe if pe>0 else mp; el=le if le>0 else ml
 elc=lce if lce>0 else mlc
 
-pronto = (mp>0 and ml>0 and ala_op>0 and (stacca_call or (mc>0 and mlc>0 and ala_c_op>0)))
+pronto = (put_pronto and ala_op>0
+           and (solo_ps or stacca_call or (call_pronta and ala_c_op>0)))
 if pronto:
     # equo arrotondati come finiranno nel foglio (per far combaciare i numeri)
     fcr,fpr,flr,flcr=round(f_c),round(f_p),round(f_l),round(f_lc)
     # sensore BANDA: markup 4 gambe misurato sul book (serve la call quotata)
     ne4_ = fcr+fpr-flr-flcr
-    mk4_ = (mc+mp-ml-mlc)/ne4_ if (mc>0 and ne4_>0) else float("nan")
+    mk4_ = (mc+mp-ml-mlc)/ne4_ if (call_pronta and ne4_>0) else float("nan")
     stacca_band = (MK_BANDA is not None and not stacca_dd and mk4_==mk4_
                    and MK_BANDA[0] <= mk4_ < MK_BANDA[1])
-    stacca_call = stacca_dd or stacca_band
+    stacca_call = solo_ps or stacca_dd or stacca_band
     if stacca_band:
         st.warning(f"✂️ CALL STACCATA — sensore BANDA MARKUP: markup 4 gambe {mk4_:.3f} "
                    f"∈ [{MK_BANDA[0]:.2f}, {MK_BANDA[1]:.2f}) = stress prezzato senza crollo. "
@@ -357,7 +399,7 @@ if pronto:
     # del modello (markup ~1.0) e trascina giu' il markup aggregato anche quando
     # la put e' ricca. In quel caso si vende solo la put, protetta dall'ala.
     ripiego_ps = False
-    if RIPIEGO_PUT_SPREAD and not stacca_call and mc>0 and ne4_>0:
+    if RIPIEGO_PUT_SPREAD and not stacca_call and call_pronta and ne4_>0:
         nm4_ = mc+mp-ml-mlc
         passa4 = (nm4_ >= ne4_*(1+MARGINE_PCT)+4*COSTO_GAMBA) and (nm4_ >= ne4_*SOGLIA_OPER)
         ne2_ = fpr-flr
