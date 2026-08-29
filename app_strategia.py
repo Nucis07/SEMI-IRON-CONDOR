@@ -1,7 +1,11 @@
 # ============================================================================
 #  PUT SPREAD MIBO — operativita' del venerdi' (browser, PC + telefono)
-#  Derivata da app_strategiav12.py, ma per la struttura a 2 GAMBE e con il
-#  motore riscalato sulla previsione HAR.
+#  v6 — agosto 2026. Derivata da app_strategiav12.py, ma per la struttura a
+#  2 GAMBE e con il motore riscalato sulla previsione HAR.
+#
+#  AVVIO:  python -m streamlit run app_putspread_live6.py
+#  (il prefisso "python -m" evita lo shim streamlit.exe, che i criteri di
+#   controllo applicazioni di Windows possono bloccare perche' non firmato)
 #
 #  COSA CAMBIA RISPETTO ALLA v12
 #  - Solo PUT: short put al 30o percentile FHS + long put 1.000 punti sotto.
@@ -14,29 +18,118 @@
 #    previsione HAR e quella GARCH. Sul campione 2016-2026 la calibrazione dei
 #    quantili diventa non rifiutabile a tutti i percentili (10,3% al 10o,
 #    19,2% al 20o, 27,0% al 30o) mentre col motore base era rifiutata ovunque.
-#  - SIZE DAL MARGINE: si aprono tutti i lotti che entrano nel capitale, cioe'
-#    parte intera di (capitale / (ampiezza x 2,5)). Con 10.000 EUR e un'ala da
-#    1.000 punti sono 4 lotti.
+#    VERIFICATO FUORI CAMPIONE sul 2014-2015, mai usati per tarare nulla: 25,5%
+#    al 30o, nessuna deviazione significativa a nessun percentile, e nel blocco
+#    piu' volatile dell'intero campione. Il motore base senza riscalatura sta a
+#    0,72-0,84 del nominale sul 2016-2026 ma a 0,83-1,10 sul 2014-2015: e'
+#    tarato bene solo quando la volatilita' e' alta, ed e' esattamente cio' che
+#    la riscalatura HAR corregge.
+#    Lo scarto fra il 30% nominale e il ~27% osservato NON e' scalibratura: lo
+#    strike viene arrotondato per difetto alla griglia da 100 punti, quindi
+#    finisce in media 50 punti (circa 0,1 sigma) piu' lontano di dove il modello
+#    lo indica. Arrotondando per eccesso lo sforamento sale al 33,9%, al piu'
+#    vicino al 30,2%. E' conservativita' deliberata e misurata, non errore.
+#  - SIZE DAL MARGINE CON TETTO: si aprono tutti i lotti che entrano nel
+#    capitale, cioe' parte intera di (capitale / (ampiezza x 2,5)), MA mai piu'
+#    di quanti ne darebbe l'ala NOMINALE da 1.000 punti. Con 10.000 EUR sono 4
+#    lotti, con 20.000 sono 8. Il tetto morde solo quando la catena non quota la
+#    long a 1.000 punti e l'ala ripiega piu' corta: li' il margine per lotto
+#    scende e la size salirebbe (a 400 punti sarebbero 10 lotti su 10.000 EUR)
+#    senza che il rischio diminuisca. Sul campione 2016-2026 il tetto riduce del
+#    10% la deviazione standard settimanale e del 20% il capitale complessivamente
+#    versato, a P&L quasi invariato.
 #
 #  PARAMETRI FISSATI QUI E NON MODIFICABILI A SCHERMO
 #  - percentile della short put: 30
 #  - ala: 1.000 punti
-#  - soglia markup: 1,15 · pavimento economico: fair x 1,104 + 2 punti
-#  - filtro ampiezza (call-put)/spot: attivo al 2,2%
-#  Sono i valori scelti dopo il confronto sistematico sul campione 2016-2026;
+#  - pavimento economico: fair x 1,10 + 2 punti  (UNICO filtro d'ingresso)
+#  Percentile e ala vengono dal confronto sistematico sul campione 2016-2026;
 #  cambiarli settimana per settimana significherebbe scegliere la struttura
 #  guardando il mercato, che e' esattamente cio' che i test hanno mostrato non
 #  funzionare. Per modificarli si tocca il blocco PARAMETRI qui sotto.
+#
+#  Il 10% del pavimento e' invece un cuscinetto sull'errore di stima scelto PER
+#  PRINCIPIO, non il massimo di una curva. Sul campione 2014-2026 nessun valore
+#  fra 0,00 e 0,20 e' distinguibile dagli altri: il rendimento oscilla di quindici
+#  punti senza schema, il leave-one-year-out perde contro entrambi gli estremi e
+#  il drawdown non e' monotono. L'apparente ottimo a 0,16 nasce da TRE venerdi'
+#  (2020-06-05, 2022-02-18, 2026-06-19): tolti quelli, la curva diventa monotona
+#  decrescente e il massimo torna a 0,10. NON ritararlo.
+#
+#  Nota su f e g: stanno DENTRO il numeratore del pavimento, quindi la sua
+#  selettivita' dipende dall'esecuzione. La barriera effettiva a f=0,60/g=0,80 e'
+#  circa il 26% sopra il fair value: 10 punti di cuscinetto e 16 di bid-ask. Il
+#  pavimento si autoregola — se lo spread si comprime opera piu' settimane da
+#  solo — ed e' anche, di fatto, un filtro sulla liquidita': le settimane che
+#  esclude hanno spread relativo mediano 0,219 contro 0,159 delle ammesse.
+#
+#  FILTRO AMPIEZZA — RIMOSSO (agosto 2026). Fino a questa versione l'ampiezza
+#  (call 75o - short put) / spot bloccava l'operativita' sotto il 2,2%, con il
+#  verdetto STRETTA. E' stato tolto per due ragioni misurate.
+#
+#  1. Non era lo stesso filtro del backtest. Qui l'ampiezza si calcola sulla
+#     distribuzione RISCALATA e sul percentile 30 (lo strike che vendi davvero);
+#     nel backtest si leggeva da strikes_settimanali_v2.csv, cioe' dal motore
+#     ORIGINALE e sul percentile 25. Stessa soglia, due grandezze diverse: la
+#     versione del backtest bloccava il 4,3% delle settimane, questa il ~33%.
+#     Il numero validato non era quello che girava il venerdi'.
+#  2. Non funziona in nessuna delle due definizioni. Sui dieci anni interi
+#     2016-2025, rendimento sul capitale impiegato: 284,5% senza filtro, 278,8%
+#     con la versione del backtest, 266,3% con questa. Il +317,7% attribuito al
+#     filtro in §8 veniva per intero dal 2026, anno parziale, e da DUE settimane.
+#     Nel 2025 il filtro non si e' attivato nemmeno una volta.
+#
+#  L'ampiezza resta CALCOLATA E MOSTRATA come diagnostica: dice quanto il
+#  modello ha stretto, ed e' un'informazione utile da leggere. Non decide piu'.
+#  Il verdetto STRETTA non viene piu' emesso.
+
+#  SOGLIA MARKUP — RIMOSSA (agosto 2026). Era 1,15, verificata su 13 anni.
+#  1. Sotto 1,12 e' INERTE: il pavimento economico morde per primo. Fra 1,00 e
+#     1,15 cambiano 13 settimane su 445.
+#  2. Sopra, la curva e' frastagliata e risale fra 1,35 e 1,40. Il valore
+#     economico dell'intera soglia nasce da QUATTRO settimane, una del 2020 e
+#     tre del 2022; negli altri nove anni in cui morde, distrugge valore.
+#  3. Il leave-one-year-out su 13 anni sceglie 1,18 (su 11 sceglieva 1,15): un
+#     parametro che si sposta aggiungendo due anni non e' stimato, e' adattato.
+#     E la soglia scelta fuori campione rende MENO del non filtrare affatto.
+#  4. Sul 2014-2015, mai usati per tarare nulla, 1,15 costa 4.050 EUR rispetto
+#     a 1,00, e non ha aiutato in nessuno degli ultimi quattro anni.
+#  5. A parita' di premio incassato, con effetti fissi anno su 633 settimane, il
+#     markup ha coefficiente -13,8 con t=-1,59. Tutto il suo potere apparente
+#     passa dal numeratore: markup alto = premio alto, e il premio alto paga. Il
+#     denominatore (fair value del modello) aggiunge rumore, non segnale.
+#  Il massimo drawdown del campione e' -14.828 con e senza la soglia.
+#  Il verdetto SOTT non si emette piu'.
+#
+#  Il markup resta CALCOLATO E MOSTRATO come diagnostica. Non decide piu'.
+#
+#  VERDETTO NQ (nuovo, agosto 2026) — la catena settimanale non quota strike
+#  utili sotto lo spot. Succede il venerdi' di un crollo violento, quando la
+#  scala degli strike non ha ancora seguito l'indice: la borsa la estende con un
+#  giorno di ritardo. Tre volte in 633 settimane, sempre con la seduta oltre il
+#  -4,5%: 2021-11-26 (Omicron), 2022-03-04 (Ucraina), 2025-04-04 (dazi). In quelle
+#  date la put piu' bassa quotata stava rispettivamente a +0,2%, +2,4% e +3,9%
+#  SOPRA lo spot: nessuna put OTM, nemmeno una.
+#  NON e' deducibile dall'app, che vede solo lo spot e non il book: lo dichiara
+#  l'operatore con la casella dedicata. E non e' un rifiuto di prezzo, e'
+#  indisponibilita' dello strumento: va distinto nel registro.
+#
+#  UNICA VARIABILE CHE PREDICE — otto sono state provate con effetti fissi anno
+#  e controllo per il premio: markup, volatilita' HAR, fattore di riscalatura,
+#  drawdown a 3 mesi, distanza dello short, struttura a termine dell'implicita,
+#  scarto implicita-realizzata, skew allo strike venduto. Nessuna sopravvive.
+#  L'unica informazione utile disponibile il venerdi' e' QUANTO TI STANNO
+#  PAGANDO, ed e' esattamente cio' su cui il pavimento gia' decide.
 #
 #  MODIFICABILI A SCHERMO
 #  - capitale (default 10.000 EUR), da cui discende il numero di lotti
 #  - prezzo del FTSE MIB, se yfinance e' in ritardo
 #  - i due strike operati, se quelli suggeriti non sono quotati
 #
-#  Avvio locale:  streamlit run app_putspread_live.py
+#  Avvio locale:  python -m streamlit run app_putspread_live6.py
 # ============================================================================
 import warnings
-from datetime import datetime
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -53,18 +146,22 @@ warnings.filterwarnings("ignore")
 TICKER = "FTSEMIB.MI"
 FINESTRA = 756                # sedute per la stima del GARCH
 N_SIM = 100_000               # cammini FHS
-ORIZZONTE_DEFAULT = 4         # giorni di borsa fino al regolamento
+H_MIN = 3                     # sotto le 3 sedute non si opera: la griglia da 100
+                              # punti vale il 72-96% della distanza dello strike
 MOLT = 2.5                    # EUR per punto
 STEP = 100.0                  # passo della griglia strike
 
 PCT_SHORT = 30.0              # percentile FHS della short put
-PCT_CALL_RIF = 75.0           # serve solo a calcolare l'ampiezza del filtro
+PCT_CALL_RIF = 75.0           # serve solo alla diagnostica sull'ampiezza
 DIST_ALA = 1000.0             # punti sotto la short put
-SOGLIA_OPER = 1.15            # markup minimo
-MARGINE_PCT = 0.104           # pavimento economico sul fair value
+# SOGLIA_OPER e' stata RIMOSSA in agosto 2026: vedi intestazione. L'unico filtro
+# d'ingresso e' il pavimento economico.
+MARGINE_PCT = 0.10            # cuscinetto sull'errore di stima, scelto per principio
 COSTO_GAMBA = 1.0             # punti per gamba (1 pt = 2,5 EUR)
 N_GAMBE = 2
-AMPIEZZA_MIN = 0.022          # (strike call 75o - strike put 30o) / spot
+# Riferimento storico dell'ampiezza, NON una soglia operativa: serve solo a
+# colorare la didascalia. Il filtro e' stato rimosso (vedi intestazione).
+AMPIEZZA_RIF = 0.022
 
 USA_EVT_TAIL = True
 SOGLIA_EVT = 0.10             # coda sinistra arricchita con GPD sotto il 10o pct
@@ -140,8 +237,15 @@ def calcola_modello(H):
     df = yf.download(TICKER, period="10y", progress=False, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
-    df = df.dropna()
-    px = df["Close"]
+    # NON usare df.dropna(): scarta la riga intera se una qualunque colonna e' NaN,
+    # e sull'indice il volume o l'adjusted close dell'ultima barra spesso lo sono.
+    # Il risultato e' che l'app perde l'ultima seduta senza dirlo.
+    px = df["Close"].dropna()
+    # La barra di OGGI, se il mercato e' aperto, e' PARZIALE: il suo rendimento non
+    # e' una seduta completa e contaminerebbe la stima del GARCH e il pool dei
+    # residui. Si stima sulle sole sedute chiuse; il prezzo corrente entra dopo,
+    # come P0, tramite prezzo_corrente().
+    px = px[px.index.date < date.today()]
     lr = (np.log(px / px.shift(1))).dropna() * 100.0
 
     rend = lr.iloc[-FINESTRA:].values
@@ -178,7 +282,29 @@ def calcola_modello(H):
 
     return dict(px_last=float(px.iloc[-1]), cum=cum * fatt, cum_garch=cum,
                 vol_garch=vol_g, vol_har=vol_h, fattore=fatt, capped=capped,
-                real20=real20, data=str(df.index[-1].date()))
+                real20=real20, data=str(px.index[-1].date()))
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def prezzo_corrente():
+    """Ultimo prezzo battuto, aggiornato ogni minuto. A mercato aperto e' il prezzo
+       in tempo reale; a mercato chiuso e' l'ultima chiusura. Separato dal modello
+       perche' quello si stima sulle sedute chiuse e si ricalcola ogni mezz'ora,
+       mentre questo deve seguire il mercato."""
+    try:
+        fi = yf.Ticker(TICKER).fast_info
+        p = float(fi["last_price"])
+        if p > 0:
+            return p, "yfinance live"
+    except Exception:
+        pass
+    try:
+        h = yf.Ticker(TICKER).history(period="5d", interval="1m")["Close"].dropna()
+        if len(h):
+            return float(h.iloc[-1]), "yfinance 1m"
+    except Exception:
+        pass
+    return None, None
 
 
 # ============================================================================
@@ -191,24 +317,120 @@ with c2:
         st.cache_data.clear()
         st.rerun()
 
-H = st.number_input(
-    "Orizzonte H (giorni di borsa fino al regolamento)",
-    min_value=1, max_value=20, value=ORIZZONTE_DEFAULT, step=1,
-    help="4 = settimana normale (ven chiusura -> ven asta di apertura). Alza a 5 se "
-         "giri il giovedi'; abbassa se la scadenza e' anticipata da festivi.")
+# ---------------- orizzonte ----------------
+# Le festivita' di Borsa Italiana sono nove e sono FISSE: 1 gennaio, venerdi'
+# santo, lunedi' dell'Angelo, 1 maggio, 15 agosto, 24-25-26 dicembre, 31 dicembre.
+# Verificate contro 4.319 giorni feriali dal 2010 al 2026: ZERO discordanze.
+# ATTENZIONE, e' il punto che sorprende: la borsa NON chiude nelle altre feste
+# civili italiane. Epifania, 25 aprile, 2 giugno, Ognissanti e Immacolata sono
+# giorni di contrattazione normali — usare un elenco generico di festivita'
+# italiane darebbe risultati sbagliati.
+def _pasqua(y):
+    a = y % 19; b = y // 100; c = y % 100; d = b // 4; e = b % 4
+    f = (b + 8) // 25; g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30; i = c // 4; k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7; m = (a + 11 * h + 22 * l) // 451
+    mo = (h + l - 7 * m + 114) // 31; da = ((h + l - 7 * m + 114) % 31) + 1
+    return date(y, mo, da)
+
+
+def _festivi(y):
+    p = _pasqua(y)
+    return {date(y, 1, 1), p - timedelta(days=2), p + timedelta(days=1),
+            date(y, 5, 1), date(y, 8, 15),
+            date(y, 12, 24), date(y, 12, 25), date(y, 12, 26), date(y, 12, 31)}
+
+
+def _seduta(d):
+    return d.weekday() < 5 and d not in _festivi(d.year)
+
+
+def _sedute_fra(a, b):
+    """sedute STRETTAMENTE comprese fra a e b"""
+    n = 0
+    x = a + timedelta(days=1)
+    while x < b:
+        if _seduta(x):
+            n += 1
+        x += timedelta(days=1)
+    return n
+
+
+def _settlement(scad):
+    g = scad
+    while not _seduta(g):
+        g -= timedelta(days=1)
+    return g
+
+
+def orizzonte(data_op):
+    """(scadenza, giorno di settlement, H) per la settimanale aperta in data_op.
+       Il regolamento e' l'asta di apertura della scadenza; se cade in un giorno
+       di chiusura si arretra all'ultima seduta utile. H conta le sedute
+       STRETTAMENTE comprese fra apertura e settlement.
+       Se la prima scadenza utile darebbe H=0 — apertura di giovedi', oppure il
+       venerdi' e' festivo e il regolamento cadrebbe oggi stesso — si passa alla
+       settimanale successiva, che e' quella che si opera davvero.
+       Riproduce H_bor del calendario storico su 642 settimane su 645."""
+    scad = data_op + timedelta(days=(4 - data_op.weekday()) % 7 or 7)
+    g = _settlement(scad)
+    if g <= data_op or _sedute_fra(data_op, g) == 0:
+        scad += timedelta(days=7)
+        g = _settlement(scad)
+    return scad, g, _sedute_fra(data_op, g)
+
+
+c_d, c_h = st.columns([1, 1])
+with c_d:
+    data_op = st.date_input("Data di apertura", value=date.today(), key="data_op",
+                            help="Normalmente oggi. Cambiala solo per simulare "
+                                 "un'altra settimana.")
+_scad, _gset, _H_auto = orizzonte(data_op)
+with c_h:
+    H = st.number_input(
+        "Orizzonte H (sedute di borsa fino al regolamento)",
+        min_value=1, max_value=20, value=int(_H_auto), step=1,
+        help="Calcolato dal calendario di Borsa Italiana. Resta modificabile: se il "
+             "book mostra una scadenza diversa da quella prevista, correggilo a mano.")
+
+st.caption(f"Scadenza {_scad:%d/%m/%Y} · regolamento all'apertura del "
+           f"{_gset:%d/%m/%Y} · **{_H_auto} sedute**"
+           + ("" if int(H) == int(_H_auto) else
+              f" — stai usando H={int(H)} invece di {_H_auto}"))
+
+if int(H) < H_MIN:
+    st.error(
+        f"⛔ SALTA — solo {int(H)} sedut{'a' if int(H) == 1 else 'e'} fino al "
+        f"regolamento. Sotto le {H_MIN} sedute il passo della griglia MIBO (100 punti) "
+        f"vale il 72-96% della distanza dello strike: tutti i percentili cadono sullo "
+        f"stesso punto di griglia e non stai piu' vendendo il 30°, stai vendendo "
+        f"l'unico strike disponibile. A H=1 la frequenza di sforamento misurata e' la "
+        f"stessa al 30° e al 40° percentile. Registra la riga e passa la settimana.")
+    st.caption("Se sei convinto che il calendario sbagli — la scadenza non e' quella "
+               "prevista — correggi H qui sopra e la pagina riparte.")
+    st.stop()
+
 M = calcola_modello(int(H))
 with c1:
     st.caption(f"Ultimo dato: {M['data']} · H={int(H)} · struttura fissa "
-               f"{int(PCT_SHORT)}/{int(DIST_ALA)} · soglia {SOGLIA_OPER:.2f}")
+               f"{int(PCT_SHORT)}/{int(DIST_ALA)} · pavimento "
+               f"fair×{1 + MARGINE_PCT:.2f}+{N_GAMBE * COSTO_GAMBA:.0f}pt")
 
 capitale = st.number_input("Capitale (EUR)", min_value=1000, max_value=1_000_000,
                            value=10000, step=1000,
                            help="Da qui discende il numero di lotti: parte intera di "
                                 "capitale diviso il margine per lotto.")
-pm = st.number_input("Prezzo FTSE MIB (lascia 0 per usare yfinance: %.0f)" % M["px_last"],
+_p_live, _fonte_live = prezzo_corrente()
+_p_auto = _p_live if _p_live else M["px_last"]
+_desc = (f"{_fonte_live}, aggiornato ogni minuto" if _p_live
+         else f"ultima chiusura del {M['data']} — prezzo live non disponibile")
+pm = st.number_input("Prezzo FTSE MIB (lascia 0 per usare %s: %.0f)" % (_desc, _p_auto),
                      min_value=0.0, value=0.0, step=1.0, format="%.0f")
-P0 = pm if pm > 0 else M["px_last"]
-fonte = "MANUALE" if pm > 0 else "yfinance"
+P0 = pm if pm > 0 else _p_auto
+fonte = "MANUALE" if pm > 0 else (_fonte_live or "ultima chiusura")
+st.caption(f"Spot **{P0:,.0f}** ({fonte}) · modello stimato sulle sedute chiuse fino "
+           f"al {M['data']} · orizzonte calcolato da {data_op:%d/%m/%Y}, non dall'ultimo "
+           f"dato di borsa")
 
 PT = P0 * np.exp(M["cum"])
 vol_w = float(M["cum"].std()) * 100
@@ -278,12 +500,23 @@ if ala <= 0:
     st.stop()
 
 marg_lotto = ala * MOLT
-lotti = int(capitale // marg_lotto)
+# TETTO AI LOTTI. Se la catena non quota la long a 1.000 punti e si ripiega piu'
+# vicino, il margine per lotto scende e la size dal margine salirebbe: con 10.000 EUR
+# e un'ala ripiegata a 400 punti sarebbero 10 lotti invece di 4. Non e' un vantaggio:
+# la perdita massima resta pari al capitale e la si tocca molto piu' spesso. Il tetto
+# e' la size che darebbe l'ala NOMINALE, cioe' quella che opereresti se entrambe le
+# put fossero quotate dove le vuoi. Sul campione 2016-2026 riduce del 10% la
+# deviazione standard settimanale e del 20% il capitale complessivamente versato.
+lotti_liberi = int(capitale // marg_lotto)
+lotti_nom = int(capitale // (DIST_ALA * MOLT))
+lotti = min(lotti_liberi, lotti_nom)
+tetto_morde = lotti_liberi > lotti_nom
 margine = marg_lotto * lotti
 
 a1, a2, a3 = st.columns(3)
 a1.metric("Ala operata", f"{ala:,.0f} pt", f"{ala/sigma_pt:.2f}σ · {100*ala/P0:.2f}% spot")
-a2.metric("Lotti", f"{lotti}", f"margine {marg_lotto:,.0f} €/lotto")
+a2.metric("Lotti", f"{lotti}", f"margine {marg_lotto:,.0f} €/lotto"
+                               + (f" · tetto {lotti_nom}" if tetto_morde else ""))
 a3.metric("Margine impegnato", f"{margine:,.0f} €",
           f"{100*margine/capitale:.0f}% del capitale")
 
@@ -291,20 +524,36 @@ if lotti < 1:
     st.error(f"⛔ Il margine di un solo lotto ({marg_lotto:,.0f} €) supera il capitale "
              f"({capitale:,.0f} €). Riduci l'ala o aumenta il capitale.")
     st.stop()
-if abs(ala - DIST_ALA) >= 1:
+if tetto_morde:
+    st.info(f"ℹ️ Ala ripiegata a {ala:,.0f} pt: il margine per lotto scende e la size "
+            f"dal margine sarebbe **{lotti_liberi} lotti**. Si opera comunque a "
+            f"**{lotti}**, la size dell'ala nominale da {DIST_ALA:,.0f} pt. Aprirne di "
+            f"piu' non ridurrebbe la perdita massima — resta pari al capitale — ma la "
+            f"farebbe toccare due o tre volte piu' spesso, e raddoppierebbe le gambe "
+            f"da eseguire. Margine impegnato {100*margine/capitale:.0f}% invece del 100%.")
+elif abs(ala - DIST_ALA) >= 1:
     st.info(f"ℹ️ Ala operata {ala:,.0f} pt invece dei {DIST_ALA:,.0f} previsti. "
             f"Perdita massima {ala - 0:,.0f} pt meno premio, per lotto; il numero di "
             f"lotti si e' adattato di conseguenza.")
 
-# ---- filtro ampiezza: quanto il modello ha stretto gli strike ----
+# ---- ampiezza: DIAGNOSTICA, non piu' un filtro ----
+# Misura quanto il modello ha stretto la distribuzione. Sotto il riferimento
+# storico del 2,2% significa "settimana di volatilita' attesa bassa": si opera
+# comunque, ma vale la pena saperlo, perche' e' anche la condizione in cui l'ala
+# fissa da 1.000 punti vale meno in percentuale dello spot.
 ampiezza_pct = (k_call_rif - Kps) / P0 if P0 > 0 else float("nan")
-troppo_stretta = ampiezza_pct == ampiezza_pct and ampiezza_pct < AMPIEZZA_MIN
-_a = "⚠️" if troppo_stretta else "✔️"
+stretta = ampiezza_pct == ampiezza_pct and ampiezza_pct < AMPIEZZA_RIF
+_a = "🔎" if stretta else "✔️"
 st.caption(f"{_a} Ampiezza short: **{100*ampiezza_pct:.2f}%** dello spot "
            f"(fra il 30° percentile put e il 75° percentile call, {k_call_rif:,.0f}) · "
-           f"soglia {100*AMPIEZZA_MIN:.1f}%. La call non si vende: questo numero misura "
-           f"solo quanto il modello ha stretto, ed e' il filtro che sui dati storici "
-           f"migliora ogni configurazione testata.")
+           f"riferimento storico {100*AMPIEZZA_RIF:.1f}%. "
+           + ("**Sotto il riferimento**: il modello ha stretto, vol attesa bassa. "
+              "Non blocca l'operativita' — il filtro e' stato rimosso perche' sui "
+              "dieci anni interi 2016-2025 costava rendimento invece di aggiungerne. "
+              if stretta else
+              "La call non si vende: questo numero misura solo quanto il modello ha "
+              "stretto, ed e' una diagnostica, non un filtro. ")
+           + f"Ala operata {100*ala/P0:.2f}% dello spot.")
 
 fv_p, fv_l = fair(Kps), fair(Kpw)
 net_equo = fv_p - fv_l
@@ -357,9 +606,57 @@ lb, la, le, fg_lp = leg_input("LONG PUT", "LONGPUT", False)
 mid = lambda b, a: (b + a) / 2 if (b > 0 and a > 0) else 0.0
 mp, ml = mid(pb, pa), mid(lb, la)
 
+# ---------------- NQ: strumento non disponibile ----------------
+# La catena non quota strike utili sotto lo spot. Non e' deducibile dall'app, che
+# vede solo lo spot e non il book: lo dichiara l'operatore. Il controllo non puo'
+# stare piu' avanti, nella catena dei verdetti, perche' senza quote non c'e' mid
+# e il flusso si ferma prima di arrivarci.
+nq = st.checkbox(
+    "⛔ La catena non quota strike utili sotto lo spot",
+    key="nq",
+    help="Spuntalo se sul book non esiste nessuna put quotata sotto lo spot, "
+         "oppure se la piu' bassa disponibile resta sopra la short suggerita e "
+         "non lascia spazio per l'ala. Genera la riga NQ per il registro e "
+         "chiude la settimana.")
+
+if nq:
+    st.error(
+        "⛔ SALTA — strumento non disponibile, non e' una decisione di prezzo.\n\n"
+        "Non alzare la short per trovare una copertura: sulle tre date del "
+        "campione l'unica struttura possibile erano due strike adiacenti "
+        "entrambi dentro i soldi, ala 100 punti, con premio pari al massimo "
+        "teorico. Non e' una vendita di volatilita', e con l'ala a 100 punti il "
+        "margine per lotto crolla e la size esploderebbe. Il 2025-04-04 il "
+        "premio mid del miglior spread possibile era perfino NEGATIVO: quelle "
+        "quote erano stantie, nessuno stava piu' prezzando quegli strike.")
+    st.subheader("Riga per il foglio")
+    riga_nq = [data_op.strftime("%d/%m/%Y"),          # A  Data apertura
+               f"{P0:.0f}",                           # B  Spot
+               f"{Kps:.0f}",                          # C  Strike PUT (indicato)
+               f"{Kpw:.0f}",                          # D  Strike LONG PUT (indicato)
+               "", "", "", "",                        # E..H  quote assenti
+               "", "",                                # I  J   eseguiti assenti
+               f"{vol_ann:.2f}",                      # K  Vol riscalata %
+               f"{M['vol_garch']:.2f}",               # L  Vol GARCH %
+               f"{M['fattore']:.3f}",                 # M  Fattore HAR
+               f"{sigma_pt:.0f}",                     # N  Sigma settimanale
+               f"{round(fv_p):.0f}",                  # O  Equo PUT
+               f"{round(fv_l):.0f}",                  # P  Equo LONG PUT
+               "NQ",                                  # Q  Verdetto
+               "0", "0",                              # R  S  lotti e margine
+               f"{capitale:.0f}"]                     # T  Capitale
+    st.code("\t".join(riga_nq), language=None)
+    st.caption("Gli strike restano scritti: sono quelli che il modello indicava e "
+               "che il mercato non quotava — l'informazione che servira' fra due "
+               "anni per sapere quanto era lontana la richiesta dall'offerta. Le "
+               "colonne delle quote e degli eseguiti restano vuote. Registra la "
+               "riga e passa la settimana.")
+    st.stop()
+
 if not (mp > 0 and ml > 0):
     st.info("Inserisci bid e ask di entrambe le gambe per calcolare markup, edge e "
-            "generare la riga del foglio.")
+            "generare la riga del foglio. Se sul book non c'e' nulla di utile sotto "
+            "lo spot, spunta la casella qui sopra.")
     st.stop()
 
 # ---------------- decisione ----------------
@@ -381,21 +678,23 @@ if net_equo_r <= 0:
 markup = net_op / net_equo_r
 markup_mid = net_mid / net_equo_r
 net_min_pav = net_equo_r * (1 + MARGINE_PCT) + N_GAMBE * COSTO_GAMBA
-net_min_oper = net_equo_r * SOGLIA_OPER
-soglia_vera = max(net_min_pav, net_min_oper)
+soglia_vera = net_min_pav
 punti_residui = net_op - soglia_vera
 edge = net_op - net_equo_r - N_GAMBE * COSTO_GAMBA
 slippage = net_mid - net_exe
 
 # Il verdetto deve distinguere PERCHE' non si opera, altrimenti il registro non
-# puo' calcolare il tasso di settimane operabili: una settimana con edge buono ma
-# bloccata dall'ampiezza non e' la stessa cosa di una senza edge.
+# puo' calcolare il tasso di settimane operabili: una settimana senza edge non e'
+# la stessa cosa di una in cui il capitale non basta.
+# RITIRATI: STRETTA (agosto 2026, col filtro ampiezza) e SOTT (agosto 2026, con la
+# soglia markup). Le righe gia' nel registro restano valide come storico; da qui in
+# avanti quelle settimane producono POS oppure NEG.
+# NQ e' nuovo: la catena settimanale non quota nessuno strike sotto lo spot. Succede
+# il venerdi' di un crollo violento, quando la scala degli strike non ha ancora
+# seguito l'indice — 2021-11-26, 2022-03-04, 2025-04-04 nel campione. Non e' una
+# scelta, e' indisponibilita' dello strumento, e va distinta da un rifiuto di prezzo.
 if net_op < net_min_pav:
     verdetto = "NEG"            # il premio non copre il pavimento economico
-elif net_op < net_min_oper:
-    verdetto = "SOTT"           # sopra il pavimento ma sotto la soglia markup
-elif troppo_stretta:
-    verdetto = "STRETTA"        # edge c'e', ma il modello ha stretto troppo gli strike
 elif margine > capitale:
     verdetto = "MARGINE"        # edge c'e', ma il capitale non basta
 else:
@@ -415,8 +714,9 @@ st.caption(f"Premio incassato **{premio_tot:,.0f} €** · perdita massima "
            f"**{perdita_max:,.0f} €** ({100*perdita_max/capitale:.0f}% del capitale) · "
            f"la long put entra a **{100*(Kpw/P0-1):+.2f}%** dallo spot")
 st.caption(f"Net dal book ({base}): {net_op:.0f} pt · pavimento economico "
-           f"{net_min_pav:.0f} pt · minimo operativo (markup {SOGLIA_OPER:.2f}) "
-           f"{net_min_oper:.0f} pt · slippage speso finora {slippage:+.0f} pt")
+           f"{net_min_pav:.0f} pt (unica soglia) · markup {markup:.2f}x, "
+           f"diagnostico e non piu' vincolante · slippage speso finora "
+           f"{slippage:+.0f} pt")
 
 # qualita' di esecuzione contro lo scenario di riferimento
 _hs_tot = _slip_tot = _hs_rif = 0.0
@@ -447,14 +747,6 @@ guardia = eseguito_inserito and (net_op < soglia_vera)
 if verdetto == "NEG":
     st.error(f"⛔ SALTA: net {net_op:.0f} pt sotto il pavimento economico "
              f"({net_min_pav:.0f} pt). Il rischio non e' pagato.")
-elif verdetto == "SOTT":
-    st.error(f"⛔ SALTA: net {net_op:.0f} pt sopra il pavimento ma sotto il minimo "
-             f"operativo {net_min_oper:.0f} pt (markup {SOGLIA_OPER:.2f}).")
-elif verdetto == "STRETTA":
-    st.error(f"⛔ NON APRIRE — l'edge c'e' ma l'ampiezza degli strike e' "
-             f"{100*ampiezza_pct:.2f}%, sotto la soglia del {100*AMPIEZZA_MIN:.1f}%. "
-             f"Il modello ha stretto perche' la vol e' bassa: il premio scende mentre "
-             f"l'ala resta larga uguale.")
 elif verdetto == "MARGINE":
     st.error(f"⛔ NON APRIRE — margine {margine:,.0f} € sopra il capitale "
              f"{capitale:,.0f} €.")
@@ -476,9 +768,25 @@ if ivw == ivw and iv_mod > 0:
     st.caption(f"Ala long put: IV implicita {ivw*100:.2f}% contro {iv_mod*100:.2f}% del "
                f"modello = {ivw/iv_mod:.2f}x — costo {ml:.0f} pt contro fair {flr:.0f} pt")
 
+# Delta dello spread. BS qui e' unita' di misura, non modello di prezzo: la
+# trasformazione prezzo -> IV -> delta e' biunivoca e l'errore del modello si
+# applica a entrambe le gambe allo stesso modo.
+ivs = iv_imp(ep, P0, Kps, "p")
+if ivs == ivs and ivw == ivw and ivs > 0 and ivw > 0:
+    d_s = -norm.cdf(-((np.log(P0 / Kps) + 0.5 * ivs * ivs) / ivs))
+    d_l = -norm.cdf(-((np.log(P0 / Kpw) + 0.5 * ivw * ivw) / ivw))
+    d_net = -(d_s - d_l)
+    st.caption(f"Delta dello spread **{d_net:+.3f}** per lotto → "
+               f"**{d_net * MOLT * lotti:+.1f} € per punto di indice** su {lotti} "
+               f"lott{'o' if lotti == 1 else 'i'}. Storico: mediana 0,278 per lotto, "
+               f"stabile fra 0,24 e 0,31 in tredici anni. E' esposizione lunga al "
+               f"mercato, non rumore: parte del rendimento viene da li'.")
+
 # ---------------- riga per il foglio ----------------
 st.subheader("Riga per il foglio")
-oggi = datetime.now().strftime("%d/%m/%Y")
+# la data della riga e' quella di apertura scelta sopra, non l'orologio:
+# se stai simulando un'altra settimana il registro deve dirlo
+oggi = data_op.strftime("%d/%m/%Y")
 si_opera = (verdetto == "POS") and (not guardia)
 n_contr = lotti if si_opera else 0
 # Ordine identico alle colonne A..T del foglio Diario del registro, tutte di input.
