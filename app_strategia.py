@@ -1,9 +1,29 @@
 # ============================================================================
 #  PUT SPREAD MIBO — operativita' del venerdi' (browser, PC + telefono)
-#  v6 — agosto 2026. Derivata da app_strategiav12.py, ma per la struttura a
-#  2 GAMBE e con il motore riscalato sulla previsione HAR.
+#  v7 — settembre 2026. Derivata dalla v6: stesso motore, flusso operativo
+#  diverso e f/g ritirati.
 #
-#  AVVIO:  python -m streamlit run app_putspread_live6.py
+#  AVVIO:  python -m streamlit run app_putspread_live7.py
+#
+#  COSA CAMBIA RISPETTO ALLA v6
+#  - f E g SONO RITIRATI. Misuravano lo scarto dal mid e richiedevano un
+#    bid/ask CONTEMPORANEO al fill. Nella pratica il book cambia fra la
+#    trascrizione e l'invio dell'ordine, e a eseguito avvenuto non si sa piu'
+#    quale fosse lo spread in quel momento: il numero registrato non era
+#    rumoroso, era un'altra grandezza. Il filo d'inciampo sull'esecuzione
+#    diventa il MARKUP ESEGUITO (net eseguito / net equo), che usa il fair
+#    value del motore: deterministico, disponibile prima dell'ordine, non
+#    scade. Le costanti F_RIF e G_RIF non esistono piu'.
+#  - FLUSSO IN DUE PASSI. Si trascrive dal book SOLO il bid/ask della LONG
+#    PUT, che essendo lontana dai soldi e' molto piu' stabile. Si compra
+#    l'ala, si inserisce il prezzo eseguito, e l'app calcola il PEGGIOR BID
+#    ACCETTABILE sulla short perche' la struttura resti sopra il pavimento.
+#    Prima dell'acquisto il bid minimo viene mostrato usando l'ASK della long,
+#    cioe' nel caso peggiore: serve a sapere in anticipo se la settimana e'
+#    operabile senza aver gia' impegnato nulla.
+#  - La riga per il registro ha ora 10 colonne (A..J) del formato v4 invece
+#    delle 20 della v3. Bid e ask non si registrano piu': alla scadenza il
+#    registro vuole due importi in euro letti da Directa, non dei prezzi.
 #  (il prefisso "python -m" evita lo shim streamlit.exe, che i criteri di
 #   controllo applicazioni di Windows possono bloccare perche' non firmato)
 #
@@ -56,12 +76,14 @@
 #  (2020-06-05, 2022-02-18, 2026-06-19): tolti quelli, la curva diventa monotona
 #  decrescente e il massimo torna a 0,10. NON ritararlo.
 #
-#  Nota su f e g: stanno DENTRO il numeratore del pavimento, quindi la sua
-#  selettivita' dipende dall'esecuzione. La barriera effettiva a f=0,60/g=0,80 e'
-#  circa il 26% sopra il fair value: 10 punti di cuscinetto e 16 di bid-ask. Il
-#  pavimento si autoregola — se lo spread si comprime opera piu' settimane da
-#  solo — ed e' anche, di fatto, un filtro sulla liquidita': le settimane che
-#  esclude hanno spread relativo mediano 0,219 contro 0,159 delle ammesse.
+#  Nota sullo scenario f=0,60 / g=0,80: e' la qualita' di esecuzione su cui
+#  poggiano i risultati storici, e resta implicita nel pavimento, che non cambia.
+#  La barriera effettiva e' circa il 26% sopra il fair value: 10 punti di
+#  cuscinetto e 16 di bid-ask. Il pavimento si autoregola — se lo spread si
+#  comprime opera piu' settimane da solo — ed e' anche, di fatto, un filtro sulla
+#  liquidita'. Dalla v7 f e g non si MISURANO piu' (vedi sopra), ma restano
+#  l'ipotesi implicita: se esegui molto peggio, i numeri storici per te sono
+#  ottimistici e te ne accorgi dal markup eseguito, non da f e g.
 #
 #  FILTRO AMPIEZZA — RIMOSSO (agosto 2026). Fino a questa versione l'ampiezza
 #  (call 75o - short put) / spot bloccava l'operativita' sotto il 2,2%, con il
@@ -168,9 +190,10 @@ SOGLIA_EVT = 0.10             # coda sinistra arricchita con GPD sotto il 10o pc
 LAG_HAR = (1, 5, 22, 66)      # orizzonti della regressione HAR
 MIN_FATT, MAX_FATT = 0.50, 2.00   # limiti del fattore di riscalatura
 
-# Scenario di esecuzione su cui poggiano i risultati storici: sulla gamba
-# venduta si assume di prendere il 60% del mezzo-spread, sulla comprata l'80%.
-F_RIF, G_RIF = 0.60, 0.80
+# F_RIF e G_RIF RITIRATI (settembre 2026). Restavano lo scenario di esecuzione
+# su cui poggiano i risultati storici (60% del mezzo-spread sulla venduta, 80%
+# sulla comprata) e stanno ancora DENTRO il numeratore del pavimento, che non
+# cambia. Non sono piu' misurabili a posteriori, quindi non si registrano.
 
 VRP_MARKUP = 1.25             # solo per la IV di riferimento nella diagnostica
 
@@ -558,53 +581,26 @@ st.caption(f"{_a} Ampiezza short: **{100*ampiezza_pct:.2f}%** dello spot "
 fv_p, fv_l = fair(Kps), fair(Kpw)
 net_equo = fv_p - fv_l
 
-# ---------------- prezzi dal book ----------------
-st.subheader("Prezzi dal book (bid / ask)")
+# ---------------- ala comprata: l'unico book che si trascrive ---------------
+# Solo la LONG PUT. Stando 1.000 punti sotto la short e' molto piu' lontana dai
+# soldi, quindi il suo bid/ask si muove poco: e' l'unico prezzo che si riesce a
+# trascrivere a mano senza che nel frattempo sia gia' cambiato. Della short non
+# si trascrive nulla: l'app calcola il bid minimo accettabile e si guarda solo
+# se il mercato lo paga.
+st.subheader("1 · Ala comprata — bid/ask dal book")
 
+c1, c2 = st.columns(2)
+lb = c1.number_input("LONG PUT BID", min_value=0.0, value=0.0, step=1.0,
+                     format="%.0f", key="LONGPUTb")
+la = c2.number_input("LONG PUT ASK", min_value=0.0, value=0.0, step=1.0,
+                     format="%.0f", key="LONGPUTa")
+ml = (lb + la) / 2 if (lb > 0 and la > 0) else 0.0
 
-def leg_input(nome, chiave, venduta):
-    """f = (mid - eseguito)/(mezzo spread) sulla VENDUTA, 0=mid 1=bid
-       g = (eseguito - mid)/(mezzo spread) sulla COMPRATA, 0=mid 1=ask
-       Il riferimento non e' un obiettivo ma il metro su cui poggiano i numeri
-       storici: sopra, quei risultati per te sono ottimistici."""
-    etich = "f (venduta)" if venduta else "g (comprata)"
-    rif = F_RIF if venduta else G_RIF
-    a, b, c, d, e_ = st.columns([1, 1, 1, 1, 1])
-    bid = a.number_input(f"{nome} BID", min_value=0.0, value=0.0, step=1.0,
-                         format="%.0f", key=chiave + "b")
-    ask = b.number_input(f"{nome} ASK", min_value=0.0, value=0.0, step=1.0,
-                         format="%.0f", key=chiave + "a")
-    exe = c.number_input(f"{nome} eseguito", min_value=0.0, value=0.0, step=1.0,
-                         format="%.0f", key=chiave + "e")
-    fg = float("nan")
-    if bid > 0 and ask > 0:
-        m_ = (bid + ask) / 2
-        sp = ask - bid
-        hs = sp / 2.0
-        if exe > 0:
-            scarto = (exe - m_) if venduta else (m_ - exe)
-            d.metric("mid", f"{m_:.1f}", f"{scarto:+.1f} vs mid",
-                     delta_color="normal" if scarto >= 0 else "inverse")
-            if hs > 0:
-                fg = -scarto / hs
-                e_.metric(etich, f"{fg:.2f}", f"{fg-rif:+.2f} vs {rif:.2f}",
-                          delta_color="inverse")
-            else:
-                e_.metric(etich, "—", "spread 0", delta_color="off")
-        else:
-            d.metric("mid", f"{m_:.1f}", f"spread {sp:.0f}", delta_color="off")
-            e_.metric(etich, "—", f"rif {rif:.2f}", delta_color="off")
-    else:
-        d.metric("mid", "—")
-        e_.metric(etich, "—")
-    return bid, ask, exe, fg
-
-
-pb, pa, pe, fg_sp = leg_input("SHORT PUT", "PUT", True)
-lb, la, le, fg_lp = leg_input("LONG PUT", "LONGPUT", False)
-
-mid = lambda b, a: (b + a) / 2 if (b > 0 and a > 0) else 0.0
-mp, ml = mid(pb, pa), mid(lb, la)
+# Mid dell'ala mostrato appena bid e ask sono entrambi inseriti. Serve solo in
+# operativita': e' il riferimento rispetto al quale si giudica il riempimento
+# della gamba comprata. Arrotondato, come tutti i prezzi dell'app.
+if ml > 0:
+    st.metric("Mid LONG PUT", f"{ml:.0f} pt")
 
 # ---------------- NQ: strumento non disponibile ----------------
 # La catena non quota strike utili sotto lo spot. Non e' deducibile dall'app, che
@@ -634,135 +630,121 @@ if nq:
                f"{P0:.0f}",                           # B  Spot
                f"{Kps:.0f}",                          # C  Strike PUT (indicato)
                f"{Kpw:.0f}",                          # D  Strike LONG PUT (indicato)
-               "", "", "", "",                        # E..H  quote assenti
-               "", "",                                # I  J   eseguiti assenti
-               f"{vol_ann:.2f}",                      # K  Vol riscalata %
-               f"{M['vol_garch']:.2f}",               # L  Vol GARCH %
-               f"{M['fattore']:.3f}",                 # M  Fattore HAR
-               f"{sigma_pt:.0f}",                     # N  Sigma settimanale
-               f"{round(fv_p):.0f}",                  # O  Equo PUT
-               f"{round(fv_l):.0f}",                  # P  Equo LONG PUT
-               "NQ",                                  # Q  Verdetto
-               "0", "0",                              # R  S  lotti e margine
-               f"{capitale:.0f}"]                     # T  Capitale
+               "", "",                                # E  F  eseguiti assenti
+               f"{round(fair(Kps)) - round(fair(Kpw)):.0f}",   # G  Net equo
+               f"{sigma_pt:.0f}",                     # H  Sigma settimanale
+               "0",                                   # I  Lotti
+               "NQ"]                                  # J  Verdetto
     st.code("\t".join(riga_nq), language=None)
-    st.caption("Gli strike restano scritti: sono quelli che il modello indicava e "
-               "che il mercato non quotava — l'informazione che servira' fra due "
-               "anni per sapere quanto era lontana la richiesta dall'offerta. Le "
-               "colonne delle quote e degli eseguiti restano vuote. Registra la "
-               "riga e passa la settimana.")
+    st.caption("Dieci colonne, **A→J**. Gli strike restano scritti: sono quelli che "
+               "il modello indicava e che il mercato non quotava — l'informazione che "
+               "servira' fra due anni per sapere quanto era lontana la richiesta "
+               "dall'offerta. Gli eseguiti restano vuoti e le colonne K..N della "
+               "scadenza non si compilano: la settimana non ha prodotto un trade.")
     st.stop()
 
-if not (mp > 0 and ml > 0):
-    st.info("Inserisci bid e ask di entrambe le gambe per calcolare markup, edge e "
-            "generare la riga del foglio. Se sul book non c'e' nulla di utile sotto "
-            "lo spot, spunta la casella qui sopra.")
+if ml <= 0:
+    st.info("Inserisci bid e ask della LONG PUT per calcolare il pavimento e il bid "
+            "minimo accettabile sulla short. Se sul book non c'e' nulla di utile "
+            "sotto lo spot, spunta la casella qui sopra.")
     st.stop()
 
-# ---------------- decisione ----------------
+# ---------------- 2 · pavimento e bid minimo sulla short --------------------
 fpr, flr = round(fv_p), round(fv_l)
 net_equo_r = fpr - flr
-ep = pe if pe > 0 else mp
-el = le if le > 0 else ml
-net_mid = mp - ml
-net_exe = ep - el
-eseguito_inserito = (pe > 0 or le > 0)
-net_op = net_exe if eseguito_inserito else net_mid
-base = "ESEGUITO" if eseguito_inserito else "MID"
 
 if net_equo_r <= 0:
     st.error("⛔ Fair value netto non positivo: la long put vale quanto la short. "
              "Controlla gli strike.")
     st.stop()
 
-markup = net_op / net_equo_r
-markup_mid = net_mid / net_equo_r
+# Il pavimento economico e' l'UNICO filtro d'ingresso e non cambia dalla v6:
+# fair netto x (1 + margine) + 2 punti di commissione.
 net_min_pav = net_equo_r * (1 + MARGINE_PCT) + N_GAMBE * COSTO_GAMBA
-soglia_vera = net_min_pav
-punti_residui = net_op - soglia_vera
-edge = net_op - net_equo_r - N_GAMBE * COSTO_GAMBA
-slippage = net_mid - net_exe
 
-# Il verdetto deve distinguere PERCHE' non si opera, altrimenti il registro non
-# puo' calcolare il tasso di settimane operabili: una settimana senza edge non e'
-# la stessa cosa di una in cui il capitale non basta.
-# RITIRATI: STRETTA (agosto 2026, col filtro ampiezza) e SOTT (agosto 2026, con la
-# soglia markup). Le righe gia' nel registro restano valide come storico; da qui in
-# avanti quelle settimane producono POS oppure NEG.
-# NQ e' nuovo: la catena settimanale non quota nessuno strike sotto lo spot. Succede
-# il venerdi' di un crollo violento, quando la scala degli strike non ha ancora
-# seguito l'indice — 2021-11-26, 2022-03-04, 2025-04-04 nel campione. Non e' una
-# scelta, e' indisponibilita' dello strumento, e va distinta da un rifiuto di prezzo.
-if net_op < net_min_pav:
-    verdetto = "NEG"            # il premio non copre il pavimento economico
+st.subheader("2 · Compra l'ala, poi vendi la short")
+
+le = st.number_input("LONG PUT eseguito (0 = non ancora comprata)",
+                     min_value=0.0, value=0.0, step=1.0, format="%.0f", key="LONGPUTe")
+
+# Prima dell'acquisto si ragiona sull'ASK, cioe' sul caso peggiore: serve a sapere
+# se la settimana e' operabile PRIMA di impegnare qualcosa. Dopo l'acquisto si usa
+# il prezzo vero e il bid minimo diventa esatto.
+costo_long = le if le > 0 else la
+base_long = "eseguito" if le > 0 else "ask, caso peggiore"
+bid_min_short = net_min_pav + costo_long
+
+st.metric("Bid minimo accettabile sulla SHORT PUT", f"{bid_min_short:.0f} pt",
+          f"pavimento {net_min_pav:.0f} + ala {costo_long:.0f} ({base_long})")
+st.caption(f"Sotto **{bid_min_short:.0f} punti** la struttura non copre il pavimento "
+           f"economico: non si vende. Il fair netto del modello e' {net_equo_r:.0f} pt "
+           f"(put {fpr:.0f} − ala {flr:.0f}); il pavimento aggiunge il "
+           f"{100*MARGINE_PCT:.0f}% di cuscinetto sull'errore di stima e i "
+           f"{N_GAMBE*COSTO_GAMBA:.0f} punti di commissione delle due gambe.")
+if le <= 0:
+    st.caption("⚠️ Valore provvisorio: calcolato sull'ASK della long. Quando avrai "
+               "comprato l'ala, scrivi qui sopra il prezzo eseguito e il bid minimo "
+               "diventera' esatto — di norma piu' basso, perche' difficilmente "
+               "pagherai tutto l'ask.")
+
+# ---------------- 3 · esecuzione della short ----------------
+st.subheader("3 · Esito")
+pe = st.number_input("SHORT PUT eseguito (0 = non ancora venduta)",
+                     min_value=0.0, value=0.0, step=1.0, format="%.0f", key="PUTe")
+saltata = st.checkbox("Il mercato non paga il pavimento: non ho operato",
+                      key="salta",
+                      help="Spuntalo per generare la riga NEG del registro. Le "
+                           "settimane saltate servono al tasso operabile, che e' uno "
+                           "dei fili d'inciampo.")
+
+eseguito_completo = (pe > 0 and le > 0)
+net_exe = (pe - le) if eseguito_completo else float("nan")
+markup = (net_exe / net_equo_r) if eseguito_completo else float("nan")
+
+if saltata:
+    verdetto = "NEG"
+elif not eseguito_completo:
+    verdetto = "—"
 elif margine > capitale:
-    verdetto = "MARGINE"        # edge c'e', ma il capitale non basta
+    verdetto = "MARGINE"
+elif net_exe < net_min_pav:
+    verdetto = "NEG"
 else:
     verdetto = "POS"
 
-st.subheader("Decisione")
-d1, d2, d3 = st.columns(3)
-d1.metric(f"Markup ({base})", f"{markup:.3f}x", f"al mid {markup_mid:.3f}")
-d2.metric("Punti residui vs soglia", f"{punti_residui:+.0f} pt",
-          "budget slippage" if punti_residui > 0 else "SOTTO SOGLIA")
-d3.metric(f"EDGE netto ({base}−comm)", f"{edge:+.0f} pt",
-          f"{edge*MOLT*lotti:+,.0f} € su {lotti} lott{'o' if lotti==1 else 'i'}")
-
-premio_tot = net_op * MOLT * lotti
-perdita_max = (ala - net_op) * MOLT * lotti
-st.caption(f"Premio incassato **{premio_tot:,.0f} €** · perdita massima "
-           f"**{perdita_max:,.0f} €** ({100*perdita_max/capitale:.0f}% del capitale) · "
-           f"la long put entra a **{100*(Kpw/P0-1):+.2f}%** dallo spot")
-st.caption(f"Net dal book ({base}): {net_op:.0f} pt · pavimento economico "
-           f"{net_min_pav:.0f} pt (unica soglia) · markup {markup:.2f}x, "
-           f"diagnostico e non piu' vincolante · slippage speso finora "
-           f"{slippage:+.0f} pt")
-
-# qualita' di esecuzione contro lo scenario di riferimento
-_hs_tot = _slip_tot = _hs_rif = 0.0
-_n = 0
-_det = []
-for _nm, _b, _a, _e, _v in (("SHORT PUT", pb, pa, pe, True), ("LONG PUT", lb, la, le, False)):
-    if _b > 0 and _a > 0 and _e > 0:
-        _hs = (_a - _b) / 2.0
-        if _hs <= 0:
-            continue
-        _sl = ((_b + _a) / 2.0 - _e) if _v else (_e - (_b + _a) / 2.0)
-        _slip_tot += _sl
-        _hs_tot += _hs
-        _hs_rif += _hs * (F_RIF if _v else G_RIF)
-        _n += 1
-        _det.append(f"{_nm} {'f' if _v else 'g'}={_sl/_hs:.2f}")
-if _n:
-    _delta = _slip_tot - _hs_rif
-    _ok = "✔️" if _delta <= 0 else "⚠️"
-    st.caption(f"{_ok} **Esecuzione vs riferimento** ({_n}/{N_GAMBE} gambe): hai pagato "
-               f"**{_slip_tot:+.1f} pt** contro i **{_hs_rif:.1f} pt** dello scenario "
-               f"f={F_RIF:.2f} / g={G_RIF:.2f} = "
-               f"**{'meglio' if _delta<=0 else 'peggio'} di {abs(_delta):.1f} pt** "
-               f"({-_delta*MOLT*lotti:+,.0f} €). · " + " · ".join(_det))
-
-guardia = eseguito_inserito and (net_op < soglia_vera)
-
-if verdetto == "NEG":
-    st.error(f"⛔ SALTA: net {net_op:.0f} pt sotto il pavimento economico "
-             f"({net_min_pav:.0f} pt). Il rischio non e' pagato.")
-elif verdetto == "MARGINE":
-    st.error(f"⛔ NON APRIRE — margine {margine:,.0f} € sopra il capitale "
-             f"{capitale:,.0f} €.")
-elif guardia:
-    st.error(f"⛔ NON APRIRE — coi fill correnti il net e' sceso a {net_op:.0f} pt, "
-             f"sotto la soglia di {soglia_vera:.0f}. Chiudi le gambe gia' aperte e "
-             f"passa la settimana.")
+if eseguito_completo:
+    premio_tot = net_exe * MOLT * lotti
+    perdita_max = (ala - net_exe) * MOLT * lotti
+    edge = net_exe - net_equo_r - N_GAMBE * COSTO_GAMBA
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Net eseguito", f"{net_exe:.0f} pt",
+              f"{net_exe - net_min_pav:+.0f} vs pavimento")
+    d2.metric("Markup eseguito", f"{markup:.3f}x", "net eseguito / net equo")
+    d3.metric("EDGE netto", f"{edge:+.0f} pt", f"{edge*MOLT*lotti:+,.0f} € su {lotti} "
+              f"lott{'o' if lotti==1 else 'i'}")
+    st.caption(f"Premio incassato **{premio_tot:,.0f} €** · perdita massima "
+               f"**{perdita_max:,.0f} €** ({100*perdita_max/capitale:.0f}% del "
+               f"capitale) · la long put entra a **{100*(Kpw/P0-1):+.2f}%** dallo spot")
+    if verdetto == "POS":
+        st.success(f"✅ OPERATA — {lotti} lott{'o' if lotti==1 else 'i'}, margine "
+                   f"{margine:,.0f} €. Net {net_exe:.0f} pt contro un pavimento di "
+                   f"{net_min_pav:.0f}: sei sopra di {net_exe-net_min_pav:.0f} punti.")
+    elif verdetto == "MARGINE":
+        st.error(f"⛔ margine {margine:,.0f} € sopra il capitale {capitale:,.0f} €.")
+    else:
+        st.error(f"⛔ Net eseguito {net_exe:.0f} pt SOTTO il pavimento "
+                 f"({net_min_pav:.0f} pt): la short e' stata venduta troppo bassa. "
+                 f"Il rischio non e' pagato.")
+elif saltata:
+    st.warning(f"Settimana saltata: il bid minimo di {bid_min_short:.0f} pt non e' "
+               f"stato raggiunto. La riga si registra comunque come NEG.")
 else:
-    st.success(f"✅ OPERA — {lotti} lott{'o' if lotti==1 else 'i'}, margine "
-               f"{margine:,.0f} €. Punti residui {punti_residui:+.0f}: puoi concedere "
-               f"fino a {punti_residui:.0f} pt lavorando gli ordini (prima l'ala, poi la "
-               f"short) e restare sopra soglia. Ordine consigliato: limite al mid, poi "
-               f"migliora di un tick finche' i punti residui restano positivi.")
+    st.info("Inserisci i due prezzi eseguiti — prima l'ala, poi la short — per "
+            "chiudere la settimana. Oppure spunta la casella qui sopra se il "
+            "mercato non paga.")
 
 # diagnostica sull'ala
-ivw = iv_imp(el, P0, Kpw, "p")
+ivw = iv_imp(le if le > 0 else ml, P0, Kpw, "p")
 iv_mod = float(M["cum"].std()) * VRP_MARKUP
 if ivw == ivw and iv_mod > 0:
     st.caption(f"Ala long put: IV implicita {ivw*100:.2f}% contro {iv_mod*100:.2f}% del "
@@ -771,7 +753,7 @@ if ivw == ivw and iv_mod > 0:
 # Delta dello spread. BS qui e' unita' di misura, non modello di prezzo: la
 # trasformazione prezzo -> IV -> delta e' biunivoca e l'errore del modello si
 # applica a entrambe le gambe allo stesso modo.
-ivs = iv_imp(ep, P0, Kps, "p")
+ivs = iv_imp(pe, P0, Kps, "p") if pe > 0 else float("nan")
 if ivs == ivs and ivw == ivw and ivs > 0 and ivw > 0:
     d_s = -norm.cdf(-((np.log(P0 / Kps) + 0.5 * ivs * ivs) / ivs))
     d_l = -norm.cdf(-((np.log(P0 / Kpw) + 0.5 * ivw * ivw) / ivw))
@@ -787,36 +769,34 @@ st.subheader("Riga per il foglio")
 # la data della riga e' quella di apertura scelta sopra, non l'orologio:
 # se stai simulando un'altra settimana il registro deve dirlo
 oggi = data_op.strftime("%d/%m/%Y")
-si_opera = (verdetto == "POS") and (not guardia)
+si_opera = (verdetto == "POS")
 n_contr = lotti if si_opera else 0
-# Ordine identico alle colonne A..T del foglio Diario del registro, tutte di input.
-# Le celle "eseguito" restano VUOTE finche' non le compili davvero: il pattern delle
-# celle vuote racconta l'esito (due piene = eseguito, una = saltato per slippage,
-# nessuna = non operato).
+
+if verdetto == "—":
+    st.info("La riga si genera quando la settimana e' chiusa: o con i due prezzi "
+            "eseguiti, o spuntando la casella della settimana saltata.")
+    st.stop()
+
+# Dieci colonne A..J del foglio Diario (registro v4). Bid e ask NON si registrano
+# piu': alla scadenza il registro vuole i due importi in euro letti da Directa.
 riga = [oggi,                                   # A  Data apertura
         f"{P0:.0f}",                            # B  Spot
         f"{Kps:.0f}",                           # C  Strike PUT (vendi)
         f"{Kpw:.0f}",                           # D  Strike LONG PUT (compri)
-        f"{pb:.0f}", f"{pa:.0f}",               # E  F  Put BID/ASK
-        f"{lb:.0f}", f"{la:.0f}",               # G  H  LongPut BID/ASK
-        f"{pe:.0f}" if pe > 0 else "",          # I  Eseguito PUT
-        f"{le:.0f}" if le > 0 else "",          # J  Eseguito LONG PUT
-        f"{vol_ann:.2f}",                       # K  Vol riscalata %
-        f"{M['vol_garch']:.2f}",                # L  Vol GARCH %
-        f"{M['fattore']:.3f}",                  # M  Fattore HAR
-        f"{sigma_pt:.0f}",                      # N  Sigma settimanale (punti)
-        f"{fpr:.0f}",                           # O  Equo PUT
-        f"{flr:.0f}",                           # P  Equo LONG PUT
-        verdetto,                               # Q  Verdetto
-        f"{n_contr:d}",                         # R  Lotti
-        f"{margine:.0f}" if si_opera else "0",  # S  Margine impegnato
-        f"{capitale:.0f}"]                      # T  Capitale
+        f"{le:.0f}" if si_opera else "",        # E  Eseguito LONG PUT
+        f"{pe:.0f}" if si_opera else "",        # F  Eseguito PUT
+        f"{net_equo_r:.0f}",                    # G  Net equo
+        f"{sigma_pt:.0f}",                      # H  Sigma settimanale (punti)
+        f"{n_contr:d}",                         # I  Lotti
+        verdetto]                               # J  Verdetto
 st.code("\t".join(riga), language=None)
 if not si_opera:
-    st.caption("⚠️ Settimana NON operata: lotti e margine a zero. La riga si registra "
-               "comunque, perche' il tasso di settimane operabili e' uno dei fili "
-               "d'inciampo e ha bisogno anche delle settimane saltate.")
+    st.caption("⚠️ Settimana NON operata: eseguiti vuoti e lotti a zero. La riga si "
+               "registra comunque, perche' il tasso di settimane operabili e' uno dei "
+               "fili d'inciampo e ha bisogno anche delle settimane saltate.")
 st.caption("Incolla nella cella **A** della prima riga vuota del foglio *Diario*: sono "
-           "20 colonne, **A→T**, tutte di input. **U** (data scadenza) e **V** (settle "
-           "dall'asta di apertura) si compilano il venerdi' successivo. Da **W** in poi "
-           "e' tutto calcolato e non va toccato.")
+           "10 colonne, **A→J**. Il venerdi' di scadenza si compilano **K** (data), "
+           "**L** (risultato della long put in €) e **M** (risultato della short put in "
+           "€), letti dalla schermata di riepilogo Directa. **N** serve solo quando "
+           "entrambe le gambe scadono a zero e il settlement non e' ricavabile. Da "
+           "**O** in poi e' tutto calcolato e non va toccato.")
