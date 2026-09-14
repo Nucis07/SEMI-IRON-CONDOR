@@ -1,9 +1,29 @@
 # ============================================================================
 #  PUT SPREAD MIBO — operativita' del venerdi' (browser, PC + telefono)
-#  v7 — settembre 2026. Derivata dalla v6: stesso motore, flusso operativo
-#  diverso e f/g ritirati.
+#  v8 — settembre 2026. Derivata dalla v7: stesso motore e stesso flusso, con
+#  una sola differenza nel condizionamento.
 #
-#  AVVIO:  python -m streamlit run app_putspread_live7.py
+#  AVVIO:  python -m streamlit run app_putspread_live8.py
+#
+#  COSA CAMBIA RISPETTO ALLA v7
+#  - IL RENDIMENTO DEL VENERDI' ENTRA NEL MODELLO. La v7 stimava GARCH e HAR
+#    sulle sedute chiuse fino a giovedi' e usava lo spot del venerdi' solo come
+#    centro della distribuzione: la larghezza non sapeva che oggi l'indice
+#    aveva fatto -3%. Il backtest invece condiziona alla CHIUSURA del venerdi'.
+#    Misurato sulle 508 settimane appaiate 2016-2025 con le regole di produzione
+#    invariate (studio_venerdi.py): condizionare al giovedi' costa il 22% del
+#    P&L (94.761 contro 121.339 EUR) e porta il drawdown massimo da -15.376 a
+#    -22.698, a sforamento e tasso operabile identici; la differenza sta nei
+#    venerdi' con |r| > 2%, dove la vol riscalata era piu' bassa di due punti.
+#    Da questa versione il rendimento del venerdi' in corso, log(spot/chiusura
+#    di giovedi'), entra come innovazione di oggi: un passo del GJR sul var0 e
+#    un punto in piu' nel campione del HAR. Il fit del GARCH resta sulle sedute
+#    chiuse. Intraday si sta fra il vecchio e il backtest; a fine seduta si
+#    coincide con il backtest. A mercato chiuso, o simulando un'altra data,
+#    non si applica nulla.
+#  - La finestra del HAR (10 anni di yfinance contro tutta la storia del
+#    backtest) e' stata verificata nello stesso studio ed e' innocua: P&L +1%,
+#    sforamento e tasso operabile uguali. Resta a 10 anni.
 #
 #  COSA CAMBIA RISPETTO ALLA v6
 #  - f E g SONO RITIRATI. Misuravano lo scarto dal mid e richiedevano un
@@ -148,7 +168,7 @@
 #  - prezzo del FTSE MIB, se yfinance e' in ritardo
 #  - i due strike operati, se quelli suggeriti non sono quotati
 #
-#  Avvio locale:  python -m streamlit run app_putspread_live6.py
+#  Avvio locale:  python -m streamlit run app_putspread_live8.py
 # ============================================================================
 import warnings
 from datetime import date, timedelta
@@ -256,7 +276,12 @@ def iv_imp(prezzo, S, K, kind):
 
 
 @st.cache_data(ttl=1800, show_spinner="Scarico i dati, stimo il GARCH e il HAR...")
-def calcola_modello(H):
+def calcola_modello(H, r_oggi=None):
+    """r_oggi: rendimento logaritmico in % della seduta in corso (spot contro
+       l'ultima chiusura), oppure None se non c'e' una seduta in corso. Entra
+       come innovazione di oggi nel GJR e come ultimo punto del HAR; il fit del
+       GARCH resta sulle sole sedute chiuse. E' arrotondato a monte in modo che
+       la cache non si invalidi a ogni tick."""
     df = yf.download(TICKER, period="10y", progress=False, auto_adjust=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
@@ -280,6 +305,16 @@ def calcola_modello(H):
     pool = np.asarray(m.std_resid)
     pool = pool[~np.isnan(pool)]
 
+    # var0 e' la varianza prevista per OGGI. Se la seduta di oggi e' in corso, il
+    # suo rendimento e' l'innovazione che porta alla varianza di lunedi', cioe'
+    # al primo passo della simulazione: un passo del GJR, come nel backtest, dove
+    # il rendimento del venerdi' e' l'ultimo del campione. Lo stesso rendimento
+    # diventa l'ultima varianza realizzata vista dal HAR.
+    lr_har = lr
+    if r_oggi is not None:
+        var0 = float(gjr(var0, r_oggi, om, al, ga, be))
+        lr_har = pd.concat([lr, pd.Series([r_oggi], index=[px.index[-1] + pd.Timedelta(days=1)])])
+
     evt = None
     if USA_EVT_TAIL and len(pool) > 30:
         u = np.quantile(pool, SOGLIA_EVT)
@@ -291,7 +326,7 @@ def calcola_modello(H):
     rng = np.random.default_rng(42)
     cum = fhs(var0, pool, om, al, ga, be, H, N_SIM, evt, rng)
     vol_g = float(cum.std()) * 100 * np.sqrt(252 / H)
-    vol_h = previsione_har(lr, H)
+    vol_h = previsione_har(lr_har, H)
 
     fatt, capped = 1.0, False
     if np.isfinite(vol_h) and vol_g > 0:
@@ -305,7 +340,7 @@ def calcola_modello(H):
 
     return dict(px_last=float(px.iloc[-1]), cum=cum * fatt, cum_garch=cum,
                 vol_garch=vol_g, vol_har=vol_h, fattore=fatt, capped=capped,
-                real20=real20, data=str(px.index[-1].date()))
+                real20=real20, data=str(px.index[-1].date()), r_oggi=r_oggi)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -433,27 +468,46 @@ if int(H) < H_MIN:
                "prevista — correggi H qui sopra e la pagina riparte.")
     st.stop()
 
-M = calcola_modello(int(H))
-with c1:
-    st.caption(f"Ultimo dato: {M['data']} · H={int(H)} · struttura fissa "
-               f"{int(PCT_SHORT)}/{int(DIST_ALA)} · pavimento "
-               f"fair×{1 + MARGINE_PCT:.2f}+{N_GAMBE * COSTO_GAMBA:.0f}pt")
+# Il modello si calcola DOPO lo spot, perche' il rendimento della seduta in corso
+# entra nel condizionamento. Prima si stima una volta senza, solo per avere
+# l'ultima chiusura da mostrare accanto al campo del prezzo.
+M0 = calcola_modello(int(H))
 
 capitale = st.number_input("Capitale (EUR)", min_value=1000, max_value=1_000_000,
                            value=10000, step=1000,
                            help="Da qui discende il numero di lotti: parte intera di "
                                 "capitale diviso il margine per lotto.")
 _p_live, _fonte_live = prezzo_corrente()
-_p_auto = _p_live if _p_live else M["px_last"]
+_p_auto = _p_live if _p_live else M0["px_last"]
 _desc = (f"{_fonte_live}, aggiornato ogni minuto" if _p_live
-         else f"ultima chiusura del {M['data']} — prezzo live non disponibile")
+         else f"ultima chiusura del {M0['data']} — prezzo live non disponibile")
 pm = st.number_input("Prezzo FTSE MIB (lascia 0 per usare %s: %.0f)" % (_desc, _p_auto),
                      min_value=0.0, value=0.0, step=1.0, format="%.0f")
 P0 = pm if pm > 0 else _p_auto
 fonte = "MANUALE" if pm > 0 else (_fonte_live or "ultima chiusura")
-st.caption(f"Spot **{P0:,.0f}** ({fonte}) · modello stimato sulle sedute chiuse fino "
-           f"al {M['data']} · orizzonte calcolato da {data_op:%d/%m/%Y}, non dall'ultimo "
-           f"dato di borsa")
+
+# Rendimento della seduta in corso: solo se OGGI e' una seduta di borsa, la data
+# di apertura e' oggi e l'ultima chiusura disponibile e' precedente a oggi. Nel
+# fine settimana, o simulando un'altra data, non c'e' nessuna seduta in corso e
+# il modello resta condizionato all'ultima chiusura, che allora E' il venerdi'.
+# Arrotondato a 0,05% perche' la cache del modello non si invalidi a ogni tick.
+_ultima = pd.Timestamp(M0["data"]).date()
+if data_op == date.today() and _seduta(data_op) and _ultima < data_op and P0 > 0:
+    r_oggi = round(float(100 * np.log(P0 / M0["px_last"])) / 0.05) * 0.05
+else:
+    r_oggi = None
+M = calcola_modello(int(H), r_oggi)
+
+with c1:
+    st.caption(f"Ultimo dato: {M['data']} · H={int(H)} · struttura fissa "
+               f"{int(PCT_SHORT)}/{int(DIST_ALA)} · pavimento "
+               f"fair×{1 + MARGINE_PCT:.2f}+{N_GAMBE * COSTO_GAMBA:.0f}pt")
+st.caption(f"Spot **{P0:,.0f}** ({fonte}) · GARCH stimato sulle sedute chiuse fino "
+           f"al {M['data']}"
+           + (f" · **seduta di oggi {r_oggi:+.2f}%** gia' dentro il modello (var0 e HAR)"
+              if r_oggi is not None else
+              " · nessuna seduta in corso: il modello e' condizionato all'ultima chiusura")
+           + f" · orizzonte calcolato da {data_op:%d/%m/%Y}")
 
 PT = P0 * np.exp(M["cum"])
 vol_w = float(M["cum"].std()) * 100
@@ -595,12 +649,14 @@ lb = c1.number_input("LONG PUT BID", min_value=0.0, value=0.0, step=1.0,
 la = c2.number_input("LONG PUT ASK", min_value=0.0, value=0.0, step=1.0,
                      format="%.0f", key="LONGPUTa")
 ml = (lb + la) / 2 if (lb > 0 and la > 0) else 0.0
-
-# Mid dell'ala mostrato appena bid e ask sono entrambi inseriti. Serve solo in
-# operativita': e' il riferimento rispetto al quale si giudica il riempimento
-# della gamba comprata. Arrotondato, come tutti i prezzi dell'app.
 if ml > 0:
+    _semi = (la - lb) / 2
+    st.caption(f"Mid long put **{ml:.0f} pt** · semispread {_semi:.0f} pt "
+               f"({100 * (la - lb) / ml:.0f}% del mid) · fair del modello {fv_l:.0f} pt "
+               f"({ml / fv_l:.2f}x)" if fv_l > 0 else
+               f"Mid long put **{ml:.0f} pt** · semispread {_semi:.0f} pt")
     st.metric("Mid LONG PUT", f"{ml:.0f} pt")
+
 
 # ---------------- NQ: strumento non disponibile ----------------
 # La catena non quota strike utili sotto lo spot. Non e' deducibile dall'app, che
